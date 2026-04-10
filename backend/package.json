@@ -1,0 +1,27 @@
+{
+  "name": "up-down-dashboard-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:ws": "node scripts/test-ws.mjs",
+    "dev": "tsx src/server/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server/main.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "puppeteer-core": "^24.7.1",
+    "sql.js": "^1.11.0",
+    "ws": "^8.18.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
