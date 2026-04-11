@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import puppeteer from "puppeteer-core";
+import puppeteer, { type Browser } from "puppeteer-core";
 import type { AppDb } from "./db.js";
 import type { ServerConfig } from "./config.js";
 import {
@@ -217,23 +217,67 @@ function buildSimpleHtml(
 </svg></body></html>`;
 }
 
+/** Static chart HTML has no network; `networkidle0` often times out on VPS / busy hosts. */
+const SET_CONTENT_WAIT: "domcontentloaded" = "domcontentloaded";
+const SET_CONTENT_TIMEOUT_MS = 120_000;
+
 export class ScreenshotWorker {
   private timer?: NodeJS.Timeout;
+  /** One browser reused for all PNGs — avoids spawning dozens of Chrome processes under load. */
+  private browser: Browser | null = null;
+  /** Prevents overlapping ticks when renders are slower than the interval (e.g. many windows). */
+  private tickInFlight = false;
+
   constructor(private readonly cfg: ServerConfig, private readonly db: AppDb) {}
 
   async start() {
     fs.mkdirSync(this.cfg.screenshotsDir, { recursive: true });
-    await this.tick();
+    await this.tick().catch((err) => console.error("[screenshotWorker] initial tick:", err));
     this.timer = setInterval(() => {
-      void this.tick();
+      void this.tick().catch((err) => console.error("[screenshotWorker] tick:", err));
     }, 8000);
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+    void this.closeBrowser();
+  }
+
+  private async closeBrowser() {
+    if (!this.browser) return;
+    try {
+      await this.browser.close();
+    } catch {
+      // ignore
+    }
+    this.browser = null;
+  }
+
+  private async ensureBrowser(): Promise<Browser> {
+    if (this.browser?.connected) return this.browser;
+    const executablePath =
+      process.env.PUPPETEER_EXECUTABLE_PATH ??
+      (process.platform === "win32"
+        ? "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        : undefined);
+    this.browser = await puppeteer.launch({
+      headless: true,
+      executablePath,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--mute-audio",
+      ],
+    });
+    return this.browser;
   }
 
   private async tick() {
+    if (this.tickInFlight) return;
+    this.tickInFlight = true;
+    try {
     const rows = this.db.getOpenWindowsNeedingScreenshot(Math.floor(Date.now() / 1000)) as Array<{
       window_slug: string;
       timeframe: string;
@@ -273,26 +317,27 @@ export class ScreenshotWorker {
         format: this.cfg.screenshotFormat,
       });
     }
+    } finally {
+      this.tickInFlight = false;
+    }
   }
 
   private async renderToFile(html: string, outPath: string, format: "png" | "jpg") {
-    const browser = await puppeteer.launch({
-      headless: true,
-      executablePath:
-        process.env.PUPPETEER_EXECUTABLE_PATH ??
-        "C:/Program Files/Google/Chrome/Application/chrome.exe",
-    });
+    const browser = await this.ensureBrowser();
+    const page = await browser.newPage();
     try {
-      const page = await browser.newPage();
       await page.setViewport({ width: 1280, height: 1040 });
-      await page.setContent(html, { waitUntil: "networkidle0" });
+      await page.setContent(html, {
+        waitUntil: SET_CONTENT_WAIT,
+        timeout: SET_CONTENT_TIMEOUT_MS,
+      });
       if (format === "jpg") {
         await page.screenshot({ path: outPath, type: "jpeg", quality: 90 });
       } else {
         await page.screenshot({ path: outPath, type: "png" });
       }
     } finally {
-      await browser.close();
+      await page.close().catch(() => {});
     }
   }
 }
