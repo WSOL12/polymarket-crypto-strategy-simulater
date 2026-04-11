@@ -110,73 +110,6 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
 }
-/** Arbitrage sim: timeframe + symbol + min edge */
-.formGridArbRow {
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  align-items: end;
-}
-.arbThresholdHint {
-  margin-top: 8px;
-  margin-bottom: 0;
-}
-.inlineCode {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 13px;
-  background: #14161a;
-  padding: 2px 6px;
-  border-radius: 4px;
-  color: #d8dce6;
-}
-.arbSectionTitle {
-  margin: 0 0 10px;
-  font-size: 16px;
-  font-weight: 600;
-  color: #cfd2d8;
-}
-.arbLivePanel {
-  padding-top: 14px;
-}
-.arbStatsGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 10px;
-}
-.arbStatCard {
-  background: #14161a;
-  border-radius: 8px;
-  padding: 10px 12px;
-  border: 1px solid #2a2e38;
-}
-.arbStatCardWide {
-  grid-column: 1 / -1;
-}
-.arbStatLabel {
-  font-size: 11px;
-  color: #9aa0a8;
-  margin-bottom: 4px;
-}
-.arbStatValue {
-  font-size: 18px;
-  font-weight: 600;
-  color: #e8e8e8;
-}
-.arbStatHit {
-  color: #7dcea0;
-}
-.arbStatMiss {
-  color: #e8b88a;
-}
-.arbCountsRow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px 24px;
-  font-size: 14px;
-  color: #cfd2d8;
-}
-.arbTable th {
-  font-size: 12px;
-  color: #9aa0a8;
-}
 .formGridWide {
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
 }
@@ -246,6 +179,22 @@ td {
   padding: 8px;
   border-bottom: 1px solid #333;
   text-align: left;
+}
+.screenshotLabelEt {
+  max-width: 36rem;
+  white-space: normal;
+  line-height: 1.35;
+  font-size: 12px;
+}
+.screenshotLabelMain {
+  font-size: 12px;
+}
+.screenshotLabelFile {
+  margin-top: 4px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #8ab4ff;
+  word-break: break-all;
 }
 a {
   color: #7dbbff;

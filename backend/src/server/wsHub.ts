@@ -1,6 +1,8 @@
 import type { Server as HttpServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ServerConfig } from "./config.js";
+import type { AppDb } from "./db.js";
+import type { PriceEvent, TimeframeKey, TrackedWindow } from "../shared/types.js";
 import { RtdsClient, type RtdsMessage } from "./rtds.js";
 import { ClobMarketClient, type BookLevel, type ClobMarketEvent } from "./clobMarket.js";
 import { recordChainlinkTick, strikeFromChainlinkBuffer } from "./chainlinkBuffer.js";
@@ -23,6 +25,9 @@ type UpDownTokens = {
   endTs: number | null;
   windowSlug: string | null;
 };
+
+/** Min interval between persisted mid samples per side (keeps DB + end-of-window chart size reasonable). */
+const WS_MID_RECORD_MIN_MS = 1500;
 
 async function resolveUpDownTokens(
   cfg: ServerConfig,
@@ -65,6 +70,45 @@ async function resolveUpDownTokens(
   return null;
 }
 
+/** Full window row for DB + same token IDs used by CLOB (Gamma path). */
+async function fetchTrackedWindowAndTokens(
+  cfg: ServerConfig,
+  timeframe: string,
+  symbol: string
+): Promise<{ tracked: TrackedWindow | null; tokens: UpDownTokens | null }> {
+  const sym = symbol.toUpperCase();
+  const tf: TimeframeKey =
+    timeframe === "5m" || timeframe === "15m" || timeframe === "1h" ? timeframe : "15m";
+  const seriesSlug =
+    tf === "1h"
+      ? `${sym.toLowerCase()}-up-or-down-hourly`
+      : `${sym.toLowerCase()}-up-or-down-${tf}`;
+  const seriesId = await fetchSeriesId(cfg.gammaBaseUrl, seriesSlug);
+  if (seriesId) {
+    const tracked = await fetchCurrentWindowBySeriesId({
+      gammaBaseUrl: cfg.gammaBaseUrl,
+      seriesId,
+      timeframe: tf,
+      symbol: sym,
+    });
+    if (tracked?.upTokenId && tracked?.downTokenId) {
+      return {
+        tracked,
+        tokens: {
+          up: tracked.upTokenId,
+          down: tracked.downTokenId,
+          startTs: tracked.startTs,
+          endTs: tracked.endTs,
+          windowSlug: tracked.windowSlug,
+        },
+      };
+    }
+  }
+  const manual = await resolveUpDownTokens(cfg, timeframe, symbol);
+  if (!manual) return { tracked: null, tokens: null };
+  return { tracked: null, tokens: manual };
+}
+
 function broadcastRtds(clients: Map<WebSocket, ClientState>, msg: RtdsMessage) {
   const out = JSON.stringify({
     type: "rtds",
@@ -87,7 +131,7 @@ function safeParse(raw: string): Record<string, unknown> | null {
   }
 }
 
-export function attachRealtimeWs(server: HttpServer, _db: unknown, cfg: ServerConfig) {
+export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfig) {
   /** Bind with `server` + `path` so `ws` owns the upgrade (manual handleUpgrade + Express often drops the socket). */
   const wss = new WebSocketServer({
     server,
@@ -135,6 +179,7 @@ export function attachRealtimeWs(server: HttpServer, _db: unknown, cfg: ServerCo
     clobKey = null;
     clobUpTokenId = null;
     clobDownTokenId = null;
+    activeTrackedWindow = null;
   };
 
   type SideSnap = {
@@ -150,6 +195,10 @@ export function attachRealtimeWs(server: HttpServer, _db: unknown, cfg: ServerCo
     up: { orderbook: null, bestBidAsk: null },
     down: { orderbook: null, bestBidAsk: null },
   };
+
+  /** Gamma window row while CLOB stream is active; used to append mid price samples for end-of-window chart. */
+  let activeTrackedWindow: TrackedWindow | null = null;
+  const lastWsMidRecordAt: { Up: number; Down: number } = { Up: 0, Down: 0 };
 
   const broadcastClobSnapshot = () => {
     const payload = JSON.stringify({
@@ -184,18 +233,54 @@ export function attachRealtimeWs(server: HttpServer, _db: unknown, cfg: ServerCo
         t: ev.timestamp,
       };
       broadcastClobSnapshot();
+
+      const w = activeTrackedWindow;
+      if (w && ev.assetId) {
+        const side: "Up" | "Down" | null =
+          ev.assetId === upId ? "Up" : ev.assetId === downId ? "Down" : null;
+        if (side) {
+          const now = Date.now();
+          if (now - lastWsMidRecordAt[side] >= WS_MID_RECORD_MIN_MS) {
+            const mid = (ev.bestBid + ev.bestAsk) / 2;
+            if (Number.isFinite(mid) && mid >= 0 && mid <= 1) {
+              lastWsMidRecordAt[side] = now;
+              const rawT = ev.timestamp;
+              const tSec =
+                rawT > 1e12 ? Math.floor(rawT / 1000) : Math.floor(rawT);
+              const evt: PriceEvent = {
+                windowSlug: w.windowSlug,
+                timeframe: w.timeframe,
+                symbol: w.symbol,
+                side,
+                tokenId: ev.assetId,
+                t: tSec,
+                p: mid,
+                source: "ws",
+                sourceId: `mid-${rawT}-${ev.assetId}`,
+              };
+              db.insertPriceEvent(evt);
+            }
+          }
+        }
+      }
     }
   };
 
   const ensureClobForSymbolTimeframe = async (timeframe: string, symbol: string, key: string) => {
     if (clob && clobKey === key) return;
-    const tokens = await resolveUpDownTokens(cfg, timeframe, symbol);
+    const { tracked, tokens } = await fetchTrackedWindowAndTokens(cfg, timeframe, symbol);
     if (!tokens) return;
 
     clob?.stop();
     clobKey = key;
     clobUpTokenId = tokens.up;
     clobDownTokenId = tokens.down;
+    activeTrackedWindow = tracked;
+    lastWsMidRecordAt.Up = 0;
+    lastWsMidRecordAt.Down = 0;
+    if (tracked) {
+      db.upsertWindow(tracked);
+    }
     snap = {
       up: { orderbook: null, bestBidAsk: null },
       down: { orderbook: null, bestBidAsk: null },
@@ -204,7 +289,7 @@ export function attachRealtimeWs(server: HttpServer, _db: unknown, cfg: ServerCo
     clob.start();
   };
 
-  // No DB "window" series streaming anymore (live ticks only).
+  // Mid prices (best bid/ask midpoint) appended to SQLite for end-of-window PNG chart.
 
   wss.on("connection", (ws) => {
     clients.set(ws, {});

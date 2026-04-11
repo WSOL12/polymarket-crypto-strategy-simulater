@@ -202,18 +202,22 @@ export class AppDb {
     const parts = ["1=1"];
     const params: unknown[] = [];
     if (filters.timeframe) {
-      parts.push("timeframe=?");
+      parts.push("s.timeframe=?");
       params.push(filters.timeframe);
     }
     if (filters.symbol) {
-      parts.push("symbol=?");
+      parts.push("s.symbol=?");
       params.push(filters.symbol);
     }
     this.assertReady();
     return this.query(
-      `SELECT * FROM screenshots WHERE ${parts.join(
-        " AND "
-      )} ORDER BY created_at DESC LIMIT 2000`,
+      `SELECT s.id, s.window_slug, s.timeframe, s.symbol, s.file_path, s.format, s.created_at,
+              w.start_ts AS start_ts, w.end_ts AS end_ts
+       FROM screenshots s
+       LEFT JOIN windows w ON w.window_slug = s.window_slug
+       WHERE ${parts.join(" AND ")}
+       ORDER BY s.created_at DESC
+       LIMIT 2000`,
       params
     );
   }

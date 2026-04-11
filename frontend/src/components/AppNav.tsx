@@ -12,9 +12,6 @@ export function AppNav() {
           <NavLink to="/" end className={linkClass}>
             Live
           </NavLink>
-          <NavLink to="/arbitrage" className={linkClass}>
-            Arbitrage sim
-          </NavLink>
           <NavLink to="/strategy" className={linkClass}>
             Strategy sim
           </NavLink>

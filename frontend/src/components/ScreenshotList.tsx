@@ -17,7 +17,7 @@ export function ScreenshotList({ rows }: Props) {
                   <th>ID</th>
                   <th>Timeframe</th>
                   <th>Symbol</th>
-                  <th>Ref</th>
+                  <th>Window / file</th>
                   <th>Preview</th>
                 </tr>
               </thead>
@@ -27,7 +27,16 @@ export function ScreenshotList({ rows }: Props) {
                     <td>{r.id}</td>
                     <td>{r.timeframe}</td>
                     <td>{r.symbol}</td>
-                    <td>{r.window_slug}</td>
+                    <td className="screenshotLabelEt">
+                      <div className="screenshotLabelMain">
+                        {r.label_et || r.file_name || r.window_slug}
+                      </div>
+                      {r.file_name ? (
+                        <div className="screenshotLabelFile" title={r.file_path}>
+                          {r.file_name}
+                        </div>
+                      ) : null}
+                    </td>
                     <td>
                       <a
                         href={`/api/screenshots/${r.id}/file`}

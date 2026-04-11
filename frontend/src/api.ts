@@ -34,6 +34,10 @@ export type StreamConfig = {
 export type ScreenshotRow = {
   id: number;
   window_slug: string;
+  /** Eastern Time range when window row joins; else file stem / slug */
+  label_et: string;
+  /** Saved image file name (e.g. BTC-5m-2026-04-07_0400-0405-ET.png) */
+  file_name: string;
   timeframe: string;
   symbol: string;
   file_path: string;

@@ -5,6 +5,41 @@ import type { AppDb } from "./db.js";
 import type { ServerConfig } from "./config.js";
 import { strikeFromChainlinkBuffer } from "./chainlinkBuffer.js";
 import { fetchGammaStrikeContext } from "./services.js";
+import { formatWindowRangeEt } from "../shared/formatEtWindow.js";
+
+/** sql.js / SQLite sometimes varies column name casing; avoid undefined → JSON omits key. */
+function rowStr(row: Record<string, unknown>, ...names: string[]): string {
+  for (const n of names) {
+    const v = row[n];
+    if (v != null && String(v) !== "") return String(v);
+  }
+  for (const k of Object.keys(row)) {
+    const kl = k.toLowerCase();
+    for (const n of names) {
+      if (kl === n.toLowerCase()) {
+        const v = row[k];
+        if (v != null && String(v) !== "") return String(v);
+      }
+    }
+  }
+  return "";
+}
+
+function rowNum(row: Record<string, unknown>, name: string): number | null {
+  const tryVal = (v: unknown): number | null => {
+    if (v == null) return null;
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "bigint") return Number(v);
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const direct = tryVal(row[name]);
+  if (direct != null) return direct;
+  for (const k of Object.keys(row)) {
+    if (k.toLowerCase() === name.toLowerCase()) return tryVal(row[k]);
+  }
+  return null;
+}
 
 function inferSymbolFromSlug(slug: string): string | null {
   const s = slug.toLowerCase();
@@ -76,7 +111,37 @@ export function createApi(db: AppDb, cfg: ServerConfig) {
   app.get("/api/screenshots", (req, res) => {
     const timeframe = typeof req.query.timeframe === "string" ? req.query.timeframe : undefined;
     const symbol = typeof req.query.symbol === "string" ? req.query.symbol : undefined;
-    res.json(db.listScreenshots({ timeframe, symbol }));
+    const rows = db.listScreenshots({ timeframe, symbol }) as Record<string, unknown>[];
+    res.json(
+      rows.map((raw) => {
+        const r = raw;
+        const id = rowNum(r, "id") ?? 0;
+        const windowSlug = rowStr(r, "window_slug");
+        const filePath = rowStr(r, "file_path");
+        const file_name = filePath ? path.basename(filePath) : "";
+        const stem = file_name.replace(/\.(png|jpg|jpeg)$/i, "");
+
+        const st = rowNum(r, "start_ts");
+        const et = rowNum(r, "end_ts");
+        let labelEt =
+          st != null && et != null && et > st ? formatWindowRangeEt(st, et) : "";
+        if (!labelEt) labelEt = stem;
+        if (!labelEt) labelEt = windowSlug;
+        if (!labelEt) labelEt = `screenshot-${id || "?"}`;
+
+        return {
+          id,
+          window_slug: windowSlug,
+          timeframe: rowStr(r, "timeframe"),
+          symbol: rowStr(r, "symbol"),
+          file_path: filePath,
+          file_name: file_name || "file.png",
+          format: rowStr(r, "format"),
+          created_at: rowNum(r, "created_at") ?? 0,
+          label_et: labelEt,
+        };
+      })
+    );
   });
 
   app.get("/api/screenshots/:id/file", (req, res) => {
