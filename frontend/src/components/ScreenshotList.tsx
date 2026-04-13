@@ -6,7 +6,7 @@ type Props = {
 
 export function ScreenshotList({ rows }: Props) {
   return (
-    <div className="panel">
+    <div className="panel screenshotPanel">
       <form className="formPanel" onSubmit={(e) => e.preventDefault()}>
         <fieldset>
           <legend>Screenshots ({rows.length})</legend>

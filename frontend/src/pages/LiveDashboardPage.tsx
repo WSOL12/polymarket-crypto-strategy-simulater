@@ -347,6 +347,14 @@ export function LiveDashboardPage() {
         }
         windowStartTs={marketWindow?.startTs ?? null}
         windowEndTs={marketWindow?.endTs ?? null}
+        tokenDiffUsd={
+          priceToBeat != null &&
+          spotRtds?.value != null &&
+          Number.isFinite(priceToBeat) &&
+          Number.isFinite(spotRtds.value)
+            ? spotRtds.value - priceToBeat
+            : null
+        }
       />
       <ScreenshotList rows={shots} />
     </main>

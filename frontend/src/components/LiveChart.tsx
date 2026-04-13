@@ -13,6 +13,7 @@ type Props = {
   liveChartWindowKey: string;
   windowStartTs?: number | null;
   windowEndTs?: number | null;
+  tokenDiffUsd?: number | null;
 };
 
 function formatTs(t: number) {
@@ -209,53 +210,60 @@ export function LiveChart({
   liveChartWindowKey,
   windowStartTs,
   windowEndTs,
+  tokenDiffUsd,
 }: Props) {
   const side = tradeOutcome === "up" ? up : down;
 
   return (
-    <div className="panel">
-      <h3>Live market data</h3>
+    <div className="panel liveMarketPanel">
+      <h3 className="liveMarketTitle">Live market data</h3>
+      <div className="liveMarketGrid">
+        <section className="liveMarketCard liveMarketChartCard">
+          <LivePriceChart
+            up={up}
+            down={down}
+            streaming={streaming}
+            windowKey={liveChartWindowKey}
+            windowStartTs={windowStartTs}
+            windowEndTs={windowEndTs}
+            tokenDiffUsd={tokenDiffUsd}
+            showHeader={false}
+          />
+        </section>
 
-      <LivePriceChart
-        up={up}
-        down={down}
-        streaming={streaming}
-        windowKey={liveChartWindowKey}
-        windowStartTs={windowStartTs}
-        windowEndTs={windowEndTs}
-      />
-
-      <form className="formPanel" onSubmit={(e) => e.preventDefault()}>
-        <fieldset>
-          <legend>Order book (CLOB)</legend>
-          <div className="obPmWrap">
-            <div className="obPmToolbar">
-              <div className="obPmTabs" role="tablist" aria-label="Outcome">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={tradeOutcome === "up"}
-                  className={`obPmTab${tradeOutcome === "up" ? " obPmTabActive" : ""}`}
-                  onClick={() => onTradeOutcomeChange("up")}
-                >
-                  Trade Up
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={tradeOutcome === "down"}
-                  className={`obPmTab${tradeOutcome === "down" ? " obPmTabActive" : ""}`}
-                  onClick={() => onTradeOutcomeChange("down")}
-                >
-                  Trade Down
-                </button>
+        <section className="liveMarketCard liveOrderbookCard">
+          <form className="formPanel" onSubmit={(e) => e.preventDefault()}>
+            <fieldset>
+              <legend>Order book (CLOB)</legend>
+              <div className="obPmWrap">
+                <div className="obPmToolbar">
+                  <div className="obPmTabs" role="tablist" aria-label="Outcome">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={tradeOutcome === "up"}
+                      className={`obPmTab${tradeOutcome === "up" ? " obPmTabActive" : ""}`}
+                      onClick={() => onTradeOutcomeChange("up")}
+                    >
+                      Trade Up
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={tradeOutcome === "down"}
+                      className={`obPmTab${tradeOutcome === "down" ? " obPmTabActive" : ""}`}
+                      onClick={() => onTradeOutcomeChange("down")}
+                    >
+                      Trade Down
+                    </button>
+                  </div>
+                </div>
+                <PolymarketOrderbook side={side} />
               </div>
-            </div>
-            <PolymarketOrderbook side={side} />
-          </div>
-        </fieldset>
-      </form>
-
+            </fieldset>
+          </form>
+        </section>
+      </div>
     </div>
   );
 }
