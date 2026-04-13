@@ -10,7 +10,7 @@ body {
 .container {
   max-width: none;
   margin: 0 auto;
-  padding: 12px 18px;
+  padding: 12px 200px;
 }
 .appNavBar {
   border-bottom: 1px solid #2a2d35;
@@ -773,11 +773,24 @@ button.askStripBtn:active:not(:disabled) {
 .liveMidChartLegend {
   display: flex;
   flex-wrap: wrap;
-  gap:18px;
+  gap: 18px;
   margin-top: 8px;
   font-size: 18px;
   align-items: center;
   font-weight: 600;
+  width: 100%;
+}
+.liveMidChartCdWrap {
+  margin-left: auto;
+  flex-shrink: 0;
+  gap: 10px;
+  align-items: flex-end;
+}
+.liveMidChartCdWrap .mhCdNum {
+  font-size: 1.15rem;
+}
+.liveMidChartCdWrap .mhCdLbl {
+  font-size: 8px;
 }
 .liveMidChartLegUp {
   color: #5ee4a1;

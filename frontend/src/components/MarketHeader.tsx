@@ -114,7 +114,7 @@ function AssetIcon({ symbol }: { symbol: string }) {
   return <IconBtc />;
 }
 
-function Countdown({ endTs, clockOffsetMs }: { endTs: number; clockOffsetMs: number }) {
+export function Countdown({ endTs, clockOffsetMs }: { endTs: number; clockOffsetMs: number }) {
   const [left, setLeft] = useState(() =>
     Math.max(0, endTs * 1000 - (Date.now() + clockOffsetMs))
   );

@@ -355,6 +355,7 @@ export function LiveDashboardPage() {
             ? spotRtds.value - priceToBeat
             : null
         }
+        clockOffsetMs={clockOffsetMs}
       />
       <ScreenshotList rows={shots} />
     </main>

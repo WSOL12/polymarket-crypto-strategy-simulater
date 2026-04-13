@@ -14,6 +14,7 @@ type Props = {
   windowStartTs?: number | null;
   windowEndTs?: number | null;
   tokenDiffUsd?: number | null;
+  clockOffsetMs?: number;
 };
 
 function formatTs(t: number) {
@@ -211,6 +212,7 @@ export function LiveChart({
   windowStartTs,
   windowEndTs,
   tokenDiffUsd,
+  clockOffsetMs = 0,
 }: Props) {
   const side = tradeOutcome === "up" ? up : down;
 
@@ -228,6 +230,7 @@ export function LiveChart({
             windowEndTs={windowEndTs}
             tokenDiffUsd={tokenDiffUsd}
             showHeader={false}
+            clockOffsetMs={clockOffsetMs}
           />
         </section>
 
