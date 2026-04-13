@@ -1,12 +1,18 @@
 import { useMemo } from "react";
 import type { BookLevel, SideClobSnapshot } from "../api";
 import type { TradeOutcomeSide } from "./OutcomeAskStrip";
+import { LivePriceChart } from "./LivePriceChart";
 
 type Props = {
   up: SideClobSnapshot;
   down: SideClobSnapshot;
   tradeOutcome: TradeOutcomeSide;
   onTradeOutcomeChange: (side: TradeOutcomeSide) => void;
+  streaming: boolean;
+  /** Clears the live price series when the market window changes. */
+  liveChartWindowKey: string;
+  windowStartTs?: number | null;
+  windowEndTs?: number | null;
 };
 
 function formatTs(t: number) {
@@ -199,12 +205,25 @@ export function LiveChart({
   down,
   tradeOutcome,
   onTradeOutcomeChange,
+  streaming,
+  liveChartWindowKey,
+  windowStartTs,
+  windowEndTs,
 }: Props) {
   const side = tradeOutcome === "up" ? up : down;
 
   return (
     <div className="panel">
       <h3>Live market data</h3>
+
+      <LivePriceChart
+        up={up}
+        down={down}
+        streaming={streaming}
+        windowKey={liveChartWindowKey}
+        windowStartTs={windowStartTs}
+        windowEndTs={windowEndTs}
+      />
 
       <form className="formPanel" onSubmit={(e) => e.preventDefault()}>
         <fieldset>

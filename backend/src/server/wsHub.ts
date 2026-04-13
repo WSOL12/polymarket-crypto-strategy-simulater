@@ -1,5 +1,5 @@
 import type { Server as HttpServer } from "node:http";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import type { ServerConfig } from "./config.js";
 import type { AppDb } from "./db.js";
 import type { PriceEvent, TimeframeKey, TrackedWindow } from "../shared/types.js";
@@ -15,7 +15,8 @@ import {
 type ClientState = {
   timeframe?: string;
   symbol?: string;
-  activeWindowSlug?: string;
+  /** `SYMBOL:timeframe` — used to route CLOB snapshots (multi-stream). */
+  subscribedKey?: string;
 };
 
 type UpDownTokens = {
@@ -117,8 +118,8 @@ function broadcastRtds(clients: Map<WebSocket, ClientState>, msg: RtdsMessage) {
     timestamp: msg.timestamp,
     payload: msg.payload,
   });
-  for (const ws of clients.keys()) {
-    if (ws.readyState === ws.OPEN) ws.send(out);
+  for (const client of clients.keys()) {
+    if (client.readyState === WebSocket.OPEN) client.send(out);
   }
 }
 
@@ -131,6 +132,31 @@ function safeParse(raw: string): Record<string, unknown> | null {
   }
 }
 
+type SideSnap = {
+  orderbook: { bids: BookLevel[]; asks: BookLevel[]; t: number } | null;
+  bestBidAsk: {
+    bestBid: number;
+    bestAsk: number;
+    spread?: number;
+    t: number;
+  } | null;
+};
+
+type ClobStreamEntry = {
+  clob: ClobMarketClient;
+  snap: { up: SideSnap; down: SideSnap };
+  activeTrackedWindow: TrackedWindow | null;
+  lastWsMidRecordAt: { Up: number; Down: number };
+  clobUpTokenId: string;
+  clobDownTokenId: string;
+};
+
+function streamKeyForClient(st: ClientState, fallbackSymbol: string): string {
+  const sym = (st.symbol ?? fallbackSymbol).toUpperCase();
+  const tf = st.timeframe ?? "15m";
+  return `${sym}:${tf}`;
+}
+
 export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfig) {
   /** Bind with `server` + `path` so `ws` owns the upgrade (manual handleUpgrade + Express often drops the socket). */
   const wss = new WebSocketServer({
@@ -141,10 +167,12 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
   const clients = new Map<WebSocket, ClientState>();
   let rtds: RtdsClient | null = null;
   let rtdsSymbol: string | null = null;
-  let clob: ClobMarketClient | null = null;
-  let clobKey: string | null = null;
-  let clobUpTokenId: string | null = null;
-  let clobDownTokenId: string | null = null;
+
+  /** One CLOB WS + snap per `BTC:5m` / `BTC:15m` / … so browsers on different horizons do not stomp each other. */
+  const clobStreams = new Map<string, ClobStreamEntry>();
+  /** Which sockets listen to each stream (Set avoids double-count if the same tab re-sends subscribe). */
+  const clobSubscribers = new Map<string, Set<WebSocket>>();
+  const clobStreamPromises = new Map<string, Promise<ClobStreamEntry | null>>();
 
   const ensureRtds = (symbol: string) => {
     const sym = symbol || cfg.symbol;
@@ -169,131 +197,214 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
     rtds.start();
   };
 
+  const stopAllClobStreams = () => {
+    for (const e of clobStreams.values()) {
+      e.clob.stop();
+    }
+    clobStreams.clear();
+    clobSubscribers.clear();
+    clobStreamPromises.clear();
+  };
+
   const stopRtdsIfIdle = () => {
     if (clients.size > 0) return;
     rtds?.stop();
     rtds = null;
     rtdsSymbol = null;
-    clob?.stop();
-    clob = null;
-    clobKey = null;
-    clobUpTokenId = null;
-    clobDownTokenId = null;
-    activeTrackedWindow = null;
+    stopAllClobStreams();
   };
 
-  type SideSnap = {
-    orderbook: { bids: BookLevel[]; asks: BookLevel[]; t: number } | null;
-    bestBidAsk: {
-      bestBid: number;
-      bestAsk: number;
-      spread?: number;
-      t: number;
-    } | null;
-  };
-  let snap: { up: SideSnap; down: SideSnap } = {
-    up: { orderbook: null, bestBidAsk: null },
-    down: { orderbook: null, bestBidAsk: null },
+  const detachClientFromStream = (client: WebSocket, streamKey: string) => {
+    const subs = clobSubscribers.get(streamKey);
+    if (!subs) return;
+    subs.delete(client);
+    if (subs.size === 0) {
+      clobSubscribers.delete(streamKey);
+      clobStreams.get(streamKey)?.clob.stop();
+      clobStreams.delete(streamKey);
+    }
   };
 
-  /** Gamma window row while CLOB stream is active; used to append mid price samples for end-of-window chart. */
-  let activeTrackedWindow: TrackedWindow | null = null;
-  const lastWsMidRecordAt: { Up: number; Down: number } = { Up: 0, Down: 0 };
+  const pushClobSnapshotToClient = (client: WebSocket, streamKey: string) => {
+    const entry = clobStreams.get(streamKey);
+    if (!entry || client.readyState !== WebSocket.OPEN) return;
+    client.send(
+      JSON.stringify({
+        type: "clob_snapshot",
+        up: entry.snap.up,
+        down: entry.snap.down,
+      })
+    );
+  };
 
-  const broadcastClobSnapshot = () => {
+  const broadcastClobSnapshot = (streamKey: string) => {
+    const entry = clobStreams.get(streamKey);
+    if (!entry) return;
     const payload = JSON.stringify({
       type: "clob_snapshot",
-      up: snap.up,
-      down: snap.down,
+      up: entry.snap.up,
+      down: entry.snap.down,
     });
-    for (const ws of clients.keys()) {
-      if (ws.readyState === ws.OPEN) ws.send(payload);
+    for (const [client, st] of clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      if (st.subscribedKey !== streamKey) continue;
+      client.send(payload);
     }
   };
 
-  const handleClobEvent = (ev: ClobMarketEvent) => {
-    const upId = clobUpTokenId;
-    const downId = clobDownTokenId;
-    if (!upId || !downId) return;
+  const makeClobHandler =
+    (streamKey: string) =>
+    (ev: ClobMarketEvent): void => {
+      const entry = clobStreams.get(streamKey);
+      if (!entry) return;
+      const upId = entry.clobUpTokenId;
+      const downId = entry.clobDownTokenId;
+      if (!upId || !downId) return;
+      const { snap } = entry;
 
-    if (ev.kind === "book") {
-      const target = ev.assetId === upId ? snap.up : ev.assetId === downId ? snap.down : null;
-      if (!target) return;
-      target.orderbook = { bids: ev.bids, asks: ev.asks, t: ev.timestamp };
-      broadcastClobSnapshot();
-      return;
-    }
-    if (ev.kind === "best_bid_ask") {
-      const target = ev.assetId === upId ? snap.up : ev.assetId === downId ? snap.down : null;
-      if (!target) return;
-      target.bestBidAsk = {
-        bestBid: ev.bestBid,
-        bestAsk: ev.bestAsk,
-        ...(ev.spread !== undefined ? { spread: ev.spread } : {}),
-        t: ev.timestamp,
-      };
-      broadcastClobSnapshot();
+      if (ev.kind === "book") {
+        const target = ev.assetId === upId ? snap.up : ev.assetId === downId ? snap.down : null;
+        if (!target) return;
+        target.orderbook = { bids: ev.bids, asks: ev.asks, t: ev.timestamp };
+        broadcastClobSnapshot(streamKey);
+        return;
+      }
+      if (ev.kind === "best_bid_ask") {
+        const target = ev.assetId === upId ? snap.up : ev.assetId === downId ? snap.down : null;
+        if (!target) return;
+        target.bestBidAsk = {
+          bestBid: ev.bestBid,
+          bestAsk: ev.bestAsk,
+          ...(ev.spread !== undefined ? { spread: ev.spread } : {}),
+          t: ev.timestamp,
+        };
+        broadcastClobSnapshot(streamKey);
 
-      const w = activeTrackedWindow;
-      if (w && ev.assetId) {
-        const side: "Up" | "Down" | null =
-          ev.assetId === upId ? "Up" : ev.assetId === downId ? "Down" : null;
-        if (side) {
-          const now = Date.now();
-          if (now - lastWsMidRecordAt[side] >= WS_MID_RECORD_MIN_MS) {
-            const mid = (ev.bestBid + ev.bestAsk) / 2;
-            if (Number.isFinite(mid) && mid >= 0 && mid <= 1) {
-              lastWsMidRecordAt[side] = now;
-              const rawT = ev.timestamp;
-              const tSec =
-                rawT > 1e12 ? Math.floor(rawT / 1000) : Math.floor(rawT);
-              const evt: PriceEvent = {
-                windowSlug: w.windowSlug,
-                timeframe: w.timeframe,
-                symbol: w.symbol,
-                side,
-                tokenId: ev.assetId,
-                t: tSec,
-                p: mid,
-                source: "ws",
-                sourceId: `mid-${rawT}-${ev.assetId}`,
-              };
-              db.insertPriceEvent(evt);
+        const w = entry.activeTrackedWindow;
+        if (w && ev.assetId) {
+          const side: "Up" | "Down" | null =
+            ev.assetId === upId ? "Up" : ev.assetId === downId ? "Down" : null;
+          if (side) {
+            const now = Date.now();
+            if (now - entry.lastWsMidRecordAt[side] >= WS_MID_RECORD_MIN_MS) {
+              const mid = (ev.bestBid + ev.bestAsk) / 2;
+              if (Number.isFinite(mid) && mid >= 0 && mid <= 1) {
+                entry.lastWsMidRecordAt[side] = now;
+                const rawT = ev.timestamp;
+                const tSec =
+                  rawT > 1e12 ? Math.floor(rawT / 1000) : Math.floor(rawT);
+                const pe: PriceEvent = {
+                  windowSlug: w.windowSlug,
+                  timeframe: w.timeframe,
+                  symbol: w.symbol,
+                  side,
+                  tokenId: ev.assetId,
+                  t: tSec,
+                  p: mid,
+                  source: "ws",
+                  sourceId: `mid-${rawT}-${ev.assetId}`,
+                };
+                db.insertPriceEvent(pe);
+              }
             }
           }
         }
       }
-    }
-  };
-
-  const ensureClobForSymbolTimeframe = async (timeframe: string, symbol: string, key: string) => {
-    if (clob && clobKey === key) return;
-    const { tracked, tokens } = await fetchTrackedWindowAndTokens(cfg, timeframe, symbol);
-    if (!tokens) return;
-
-    clob?.stop();
-    clobKey = key;
-    clobUpTokenId = tokens.up;
-    clobDownTokenId = tokens.down;
-    activeTrackedWindow = tracked;
-    lastWsMidRecordAt.Up = 0;
-    lastWsMidRecordAt.Down = 0;
-    if (tracked) {
-      db.upsertWindow(tracked);
-    }
-    snap = {
-      up: { orderbook: null, bestBidAsk: null },
-      down: { orderbook: null, bestBidAsk: null },
     };
-    clob = new ClobMarketClient([tokens.up, tokens.down], handleClobEvent);
-    clob.start();
+
+  const emptySnap = (): { up: SideSnap; down: SideSnap } => ({
+    up: { orderbook: null, bestBidAsk: null },
+    down: { orderbook: null, bestBidAsk: null },
+  });
+
+  /** Create CLOB connection for this key if missing (shared by all subscribers). */
+  const getOrCreateClobStream = async (
+    streamKey: string,
+    timeframe: string,
+    symbol: string
+  ): Promise<ClobStreamEntry | null> => {
+    const existing = clobStreams.get(streamKey);
+    if (existing) return existing;
+
+    let p = clobStreamPromises.get(streamKey);
+    if (!p) {
+      p = (async (): Promise<ClobStreamEntry | null> => {
+        const { tracked, tokens } = await fetchTrackedWindowAndTokens(
+          cfg,
+          timeframe,
+          symbol
+        );
+        if (!tokens) return null;
+        if (clobStreams.has(streamKey)) {
+          return clobStreams.get(streamKey)!;
+        }
+        if (tracked) {
+          db.upsertWindow(tracked);
+        }
+        const snap = emptySnap();
+        const entry: ClobStreamEntry = {
+          clob: new ClobMarketClient(
+            [tokens.up, tokens.down],
+            makeClobHandler(streamKey)
+          ),
+          snap,
+          activeTrackedWindow: tracked,
+          lastWsMidRecordAt: { Up: 0, Down: 0 },
+          clobUpTokenId: tokens.up,
+          clobDownTokenId: tokens.down,
+        };
+        clobStreams.set(streamKey, entry);
+        entry.clob.start();
+        return entry;
+      })().finally(() => {
+        clobStreamPromises.delete(streamKey);
+      });
+      clobStreamPromises.set(streamKey, p);
+    }
+
+    return p;
   };
 
-  // Mid prices (best bid/ask midpoint) appended to SQLite for end-of-window PNG chart.
+  const sendClobStreamStatus = async (
+    client: WebSocket,
+    timeframe: string,
+    symbol: string
+  ) => {
+    const pair = await resolveUpDownTokens(cfg, timeframe, symbol);
+    let priceToBeat: number | null = null;
+    if (pair?.windowSlug) {
+      const ctx = await fetchGammaStrikeContext(cfg.gammaBaseUrl, pair.windowSlug);
+      priceToBeat = ctx.metadataStrike;
+      const openSec =
+        ctx.startTs > 0 ? ctx.startTs : pair.startTs != null && pair.startTs > 0 ? pair.startTs : 0;
+      if (priceToBeat == null && openSec > 0) {
+        priceToBeat = strikeFromChainlinkBuffer(symbol, openSec);
+      }
+    } else if (pair?.startTs != null && pair.startTs > 0) {
+      priceToBeat = strikeFromChainlinkBuffer(symbol, pair.startTs);
+    }
+    if (client.readyState !== WebSocket.OPEN) return;
+    const windowPayload =
+      pair && pair.startTs != null && pair.endTs != null
+        ? {
+            startTs: pair.startTs,
+            endTs: pair.endTs,
+            windowSlug: pair.windowSlug,
+            ...(priceToBeat != null ? { priceToBeat } : {}),
+          }
+        : null;
+    client.send(
+      JSON.stringify({
+        type: "stream_status",
+        updownClob: pair ? "active" : "no_tokens",
+        window: windowPayload,
+      })
+    );
+  };
 
   wss.on("connection", (ws) => {
     clients.set(ws, {});
-    if (ws.readyState === ws.OPEN) {
+    if (ws.readyState === WebSocket.OPEN) {
       ws.send(
         JSON.stringify({
           type: "connected",
@@ -309,47 +420,63 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
         const state = clients.get(ws) ?? {};
         if (typeof msg.timeframe === "string") state.timeframe = msg.timeframe;
         if (typeof msg.symbol === "string") state.symbol = msg.symbol;
-        clients.set(ws, state);
-        ensureRtds(state.symbol ?? cfg.symbol);
         const tf = state.timeframe ?? "15m";
         const sym = state.symbol ?? cfg.symbol;
-        const clobStreamKey = `${sym}:${tf}`;
-        void ensureClobForSymbolTimeframe(tf, sym, clobStreamKey)
-          .then(async () => {
-            const pair = await resolveUpDownTokens(cfg, tf, sym);
-            let priceToBeat: number | null = null;
-            if (pair?.windowSlug) {
-              const ctx = await fetchGammaStrikeContext(cfg.gammaBaseUrl, pair.windowSlug);
-              priceToBeat = ctx.metadataStrike;
-              const openSec =
-                ctx.startTs > 0 ? ctx.startTs : pair.startTs != null && pair.startTs > 0 ? pair.startTs : 0;
-              if (priceToBeat == null && openSec > 0) {
-                priceToBeat = strikeFromChainlinkBuffer(sym, openSec);
+        const newKey = streamKeyForClient(state, cfg.symbol);
+        const oldKey = state.subscribedKey;
+        if (oldKey && oldKey !== newKey) {
+          detachClientFromStream(ws, oldKey);
+        }
+        state.subscribedKey = newKey;
+        clients.set(ws, state);
+
+        let subs = clobSubscribers.get(newKey);
+        if (subs?.has(ws)) {
+          ensureRtds(sym);
+          void sendClobStreamStatus(ws, tf, sym).then(() => pushClobSnapshotToClient(ws, newKey));
+          return;
+        }
+        if (!subs) {
+          subs = new Set();
+          clobSubscribers.set(newKey, subs);
+        }
+        subs.add(ws);
+
+        ensureRtds(sym);
+
+        if (clobStreams.has(newKey)) {
+          void sendClobStreamStatus(ws, tf, sym).then(() => pushClobSnapshotToClient(ws, newKey));
+          return;
+        }
+
+        void getOrCreateClobStream(newKey, tf, sym)
+          .then((entry) => {
+            if (!entry) {
+              subs?.delete(ws);
+              if (subs && subs.size === 0) {
+                clobSubscribers.delete(newKey);
               }
-            } else if (pair?.startTs != null && pair.startTs > 0) {
-              priceToBeat = strikeFromChainlinkBuffer(sym, pair.startTs);
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: "stream_status",
+                    updownClob: "no_tokens",
+                    window: null,
+                  })
+                );
+              }
+              return;
             }
-            if (ws.readyState === ws.OPEN) {
-              const windowPayload =
-                pair && pair.startTs != null && pair.endTs != null
-                  ? {
-                      startTs: pair.startTs,
-                      endTs: pair.endTs,
-                      windowSlug: pair.windowSlug,
-                      ...(priceToBeat != null ? { priceToBeat } : {}),
-                    }
-                  : null;
-              ws.send(
-                JSON.stringify({
-                  type: "stream_status",
-                  updownClob: pair ? "active" : "no_tokens",
-                  window: windowPayload,
-                })
-              );
-            }
+            return sendClobStreamStatus(ws, tf, sym).then(() =>
+              pushClobSnapshotToClient(ws, newKey)
+            );
           })
           .catch((err) => {
-            if (ws.readyState === ws.OPEN) {
+            subs?.delete(ws);
+            if (subs && subs.size === 0) {
+              clobSubscribers.delete(newKey);
+            }
+            if (ws.readyState === WebSocket.OPEN) {
               ws.send(
                 JSON.stringify({
                   type: "stream_status",
@@ -361,11 +488,13 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
             }
           });
       }
-      if (msg.action === "ping" && ws.readyState === ws.OPEN) {
+      if (msg.action === "ping" && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "pong", ts: Date.now() }));
       }
     });
     ws.on("close", () => {
+      const st = clients.get(ws);
+      if (st?.subscribedKey) detachClientFromStream(ws, st.subscribedKey);
       clients.delete(ws);
       stopRtdsIfIdle();
     });
@@ -375,11 +504,7 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
     rtds?.stop();
     rtds = null;
     rtdsSymbol = null;
-    clob?.stop();
-    clob = null;
-    clobKey = null;
-    clobUpTokenId = null;
-    clobDownTokenId = null;
+    stopAllClobStreams();
     wss.close();
   };
 }

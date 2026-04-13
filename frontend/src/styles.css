@@ -745,3 +745,44 @@ button.askStripBtn:active:not(:disabled) {
   border-radius: 12px;
   font-size: clamp(1.12rem, 2.5vw, 1.6rem);
 }
+
+/* Live mid price (Up / Down) time series */
+.liveMidChart {
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2a2d35;
+}
+.liveMidChart h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+.liveMidChartLead {
+  margin: 0 0 10px;
+}
+.liveMidChartSvgWrap {
+  width: 960px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.liveMidChartSvg {
+  display: block;
+  width: 960px;
+  height: 600px;
+  max-width: 100%;
+  height: auto;
+}
+.liveMidChartLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.liveMidChartLegUp {
+  color: #5ee4a1;
+  font-weight: 600;
+}
+.liveMidChartLegDown {
+  color: #ff8a8e;
+  font-weight: 600;
+}

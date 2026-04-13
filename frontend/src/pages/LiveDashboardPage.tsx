@@ -337,6 +337,16 @@ export function LiveDashboardPage() {
         down={clobSnap.down}
         tradeOutcome={tradeOutcome}
         onTradeOutcomeChange={setTradeOutcome}
+        streaming={streaming}
+        liveChartWindowKey={
+          marketWindow
+            ? `${marketWindow.startTs}-${marketWindow.endTs}`
+            : streaming
+              ? "pending"
+              : ""
+        }
+        windowStartTs={marketWindow?.startTs ?? null}
+        windowEndTs={marketWindow?.endTs ?? null}
       />
       <ScreenshotList rows={shots} />
     </main>
