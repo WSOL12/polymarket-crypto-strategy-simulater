@@ -1,4 +1,5 @@
 import type { TimeframeKey, TrackedWindow } from "../shared/types.js";
+import { strikeFromChainlinkBuffer } from "./chainlinkBuffer.js";
 
 type GammaSeries = { id: string };
 type GammaSeriesLookup = GammaSeries | GammaSeries[];
@@ -306,4 +307,37 @@ export async function fetchEventPriceToBeatFromGamma(
 ): Promise<number | null> {
   const ctx = await fetchGammaStrikeContext(gammaBaseUrl, windowSlug);
   return ctx.metadataStrike;
+}
+
+export type GammaEventResolution = {
+  strike: number | null;
+  finalPrice: number | null;
+  startTs: number;
+  endTs: number;
+};
+
+/**
+ * Strike + settlement reference from Gamma (`priceToBeat`, `finalPrice`) for sim PnL.
+ * Strike falls back to in-process Chainlink buffer when metadata omits it.
+ */
+export async function fetchGammaEventResolution(
+  gammaBaseUrl: string,
+  windowSlug: string,
+  symbol: string
+): Promise<GammaEventResolution | null> {
+  if (!windowSlug) return null;
+  const url = new URL(`${gammaBaseUrl}/events`);
+  url.searchParams.set("slug", windowSlug);
+  const events = await fetchJson<GammaEvent[]>(url, 8000).catch(() => null);
+  const e = events?.[0];
+  if (!e) return null;
+  const startTs = windowStartTs(e);
+  const endTs = windowEndTs(e);
+  const rawStrike = e.eventMetadata?.priceToBeat;
+  let strike = parseMetadataStrike(rawStrike);
+  const finalPrice = parseMetadataStrike(e.eventMetadata?.finalPrice);
+  if (strike == null && startTs > 0) {
+    strike = strikeFromChainlinkBuffer(symbol.toUpperCase(), startTs);
+  }
+  return { strike, finalPrice, startTs, endTs };
 }

@@ -27,8 +27,8 @@ type UpDownTokens = {
   windowSlug: string | null;
 };
 
-/** Min interval between persisted mid samples per side (keeps DB + end-of-window chart size reasonable). */
-const WS_MID_RECORD_MIN_MS = 1500;
+/** Min interval between persisted best-ask samples per side (keeps DB + end-of-window chart size reasonable). */
+const WS_BEST_ASK_RECORD_MIN_MS = 1500;
 
 async function resolveUpDownTokens(
   cfg: ServerConfig,
@@ -146,7 +146,7 @@ type ClobStreamEntry = {
   clob: ClobMarketClient;
   snap: { up: SideSnap; down: SideSnap };
   activeTrackedWindow: TrackedWindow | null;
-  lastWsMidRecordAt: { Up: number; Down: number };
+  lastWsBestAskRecordAt: { Up: number; Down: number };
   clobUpTokenId: string;
   clobDownTokenId: string;
 };
@@ -286,10 +286,10 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
             ev.assetId === upId ? "Up" : ev.assetId === downId ? "Down" : null;
           if (side) {
             const now = Date.now();
-            if (now - entry.lastWsMidRecordAt[side] >= WS_MID_RECORD_MIN_MS) {
-              const mid = (ev.bestBid + ev.bestAsk) / 2;
-              if (Number.isFinite(mid) && mid >= 0 && mid <= 1) {
-                entry.lastWsMidRecordAt[side] = now;
+            if (now - entry.lastWsBestAskRecordAt[side] >= WS_BEST_ASK_RECORD_MIN_MS) {
+              const bestAsk = ev.bestAsk;
+              if (Number.isFinite(bestAsk) && bestAsk >= 0 && bestAsk <= 1) {
+                entry.lastWsBestAskRecordAt[side] = now;
                 const rawT = ev.timestamp;
                 const tSec =
                   rawT > 1e12 ? Math.floor(rawT / 1000) : Math.floor(rawT);
@@ -300,9 +300,9 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
                   side,
                   tokenId: ev.assetId,
                   t: tSec,
-                  p: mid,
+                  p: bestAsk,
                   source: "ws",
-                  sourceId: `mid-${rawT}-${ev.assetId}`,
+                  sourceId: `bestAsk-${rawT}-${ev.assetId}`,
                 };
                 db.insertPriceEvent(pe);
               }
@@ -349,7 +349,7 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
           ),
           snap,
           activeTrackedWindow: tracked,
-          lastWsMidRecordAt: { Up: 0, Down: 0 },
+          lastWsBestAskRecordAt: { Up: 0, Down: 0 },
           clobUpTokenId: tokens.up,
           clobDownTokenId: tokens.down,
         };

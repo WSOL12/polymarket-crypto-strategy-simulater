@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { SideClobSnapshot } from "../api";
 import { Countdown } from "./MarketHeader";
 
-type Point = { t: number; up: number; down: number };
+type Point = { t: number; up: number; down: number; diffUsd: number | null };
 
 type Props = {
   up: SideClobSnapshot;
@@ -25,14 +25,21 @@ type Props = {
 const MAX_POINTS = 1500;
 const THROTTLE_MS = 280;
 const MIN_MOVE = 0.0015;
+const MIN_DIFF_MOVE_USD = 0.05;
+const PRICE_GRID_STEPS = 50;
+const DIFF_USD_PER_GRID = 5; // 2 grids = $10
+const DIFF_MAX_ABS_USD = (PRICE_GRID_STEPS / 2) * DIFF_USD_PER_GRID; // +/-125
 /** Fixed horizontal time window. New points appear at right, older points scroll left. */
 const WINDOW_MS = 90_000;
-const TIME_DIVISIONS = 40;
+const FIVE_MIN_MS = 5 * 60 * 1000;
+const TIME_LABEL_STEP_SEC_5M = 15;
+const TIME_LABEL_STEP_SEC_DEFAULT = 30;
+const TIME_LABEL_STEP_SEC_HOURLY = 120;
 const CHART_W = 960;
 const CHART_H = 600;
 const PLOT = {
   left: 72,
-  right: 900,
+  right: 888,
   top: 48,
   bottom: 520,
 } as const;
@@ -48,7 +55,6 @@ function bestAskFromSide(side: SideClobSnapshot): number | null {
 function fmtCents(p: number): string {
   // Match the header Up/Down pill formatting (OutcomeAskStrip).
   const c = p * 100;
-  if (c >= 1) return `${Math.round(c)}¢`;
   if (c >= 0.1) return `${c.toFixed(1)}¢`;
   return `${c.toFixed(2)}¢`;
 }
@@ -92,15 +98,16 @@ export function LivePriceChart({
   clockOffsetMs = 0,
 }: Props) {
   const [points, setPoints] = useState<Point[]>([]);
-  const [clockMs, setClockMs] = useState(() => Date.now());
+  const [clockMs, setClockMs] = useState(() => Date.now() + clockOffsetMs);
   const lastPushRef = useRef(0);
   const prevWindowKeyRef = useRef(windowKey);
+  const xLabelStepSecRef = useRef(TIME_LABEL_STEP_SEC_DEFAULT);
 
   useEffect(() => {
     if (!streaming) return;
-    const id = setInterval(() => setClockMs(Date.now()), 500);
+    const id = setInterval(() => setClockMs(Date.now() + clockOffsetMs), 500);
     return () => clearInterval(id);
-  }, [streaming]);
+  }, [streaming, clockOffsetMs]);
 
   useEffect(() => {
     if (!streaming) {
@@ -124,31 +131,43 @@ export function LivePriceChart({
     if (uRaw == null && dRaw == null) return;
 
     setPoints((prev) => {
-      const now = Date.now();
+      const now = Date.now() + clockOffsetMs;
       const last = prev.length ? prev[prev.length - 1] : null;
 
       const nu = uRaw ?? last?.up ?? (dRaw != null ? 1 - dRaw : 0.5);
       const nd = dRaw ?? last?.down ?? (uRaw != null ? 1 - uRaw : 0.5);
+      const ndiff =
+        typeof tokenDiffUsd === "number" && Number.isFinite(tokenDiffUsd)
+          ? tokenDiffUsd
+          : (last?.diffUsd ?? null);
 
       if (last) {
         const elapsed = now - lastPushRef.current;
         const moved =
-          Math.abs(nu - last.up) >= MIN_MOVE || Math.abs(nd - last.down) >= MIN_MOVE;
+          Math.abs(nu - last.up) >= MIN_MOVE ||
+          Math.abs(nd - last.down) >= MIN_MOVE ||
+          (ndiff != null && last.diffUsd != null
+            ? Math.abs(ndiff - last.diffUsd) >= MIN_DIFF_MOVE_USD
+            : false);
         if (elapsed < THROTTLE_MS && !moved) return prev;
       }
 
-      lastPushRef.current = now;
+      // Clock offset can be adjusted from server sync, which may move "now" backwards.
+      // Keep chart time strictly monotonic to prevent left-right jitter.
+      const nextT = last ? Math.max(now, last.t + 1) : now;
+      lastPushRef.current = nextT;
       const next: Point[] = [
         ...prev,
         {
-          t: now,
+          t: nextT,
           up: Math.max(0, Math.min(1, nu)),
           down: Math.max(0, Math.min(1, nd)),
+          diffUsd: ndiff,
         },
       ];
       return next.length > MAX_POINTS ? next.slice(-MAX_POINTS) : next;
     });
-  }, [up, down, streaming]);
+  }, [up, down, tokenDiffUsd, streaming, clockOffsetMs]);
 
   const svgPaths = useMemo(() => {
     if (points.length < 2) return null;
@@ -186,7 +205,7 @@ export function LivePriceChart({
       const targetT = Math.max(minT, Math.min(maxBoundT, clockMs));
       const last = visible[visible.length - 1];
       if (targetT > last.t) {
-        upSeries = [...visible, { t: targetT, up: last.up, down: last.down }];
+        upSeries = [...visible, { t: targetT, up: last.up, down: last.down, diffUsd: last.diffUsd }];
         downSeries = upSeries;
       }
     }
@@ -198,28 +217,73 @@ export function LivePriceChart({
       .map((pt) => `${xAt(pt.t).toFixed(1)},${yAt(pt.down).toFixed(1)}`)
       .join(" ");
 
+    const diffVisible = visible.filter((pt) => pt.diffUsd != null) as Array<
+      Point & { diffUsd: number }
+    >;
+    const diffAbsMax = DIFF_MAX_ABS_USD;
+    const diffCenterY = PLOT.top + innerH / 2;
+    const pxPerGrid = innerH / PRICE_GRID_STEPS;
+    const yDiffAt = (d: number) => {
+      if (!Number.isFinite(diffAbsMax) || diffAbsMax <= 0) return yAt(0.5);
+      const clamped = Math.max(-diffAbsMax, Math.min(diffAbsMax, d));
+      return diffCenterY - (clamped / DIFF_USD_PER_GRID) * pxPerGrid;
+    };
+    const diffPts =
+      Number.isFinite(diffAbsMax) && diffVisible.length > 1
+        ? diffVisible
+            .map((pt) => `${xAt(pt.t).toFixed(1)},${yDiffAt(pt.diffUsd).toFixed(1)}`)
+            .join(" ")
+        : null;
+    const diffTicksRaw =
+      Number.isFinite(diffAbsMax) && diffAbsMax > 0
+        ? (() => {
+            const start = Math.ceil((-diffAbsMax) / 10) * 10;
+            const end = Math.floor(diffAbsMax / 10) * 10;
+            const out: Array<{ y: number; v: number }> = [];
+            for (let v = start; v <= end; v += 10) out.push({ y: yDiffAt(v), v });
+            return out;
+          })()
+        : [];
+    const diffTicks = diffTicksRaw.filter((t) => t.y >= PLOT.top + 12 && t.y <= PLOT.bottom - 12);
+
     const yTicks = Array.from({ length: 51 }, (_, i) => i * 2).map((cents) => {
       const p = cents / 100;
       return { cents, y: yAt(p) };
     });
 
-    const stepMs = spanT / TIME_DIVISIONS;
-    const xTicks = Array.from({ length: TIME_DIVISIONS + 1 }, (_, i) => {
-      const elapsedSec = (i * stepMs) / 1000;
-      const tAbs = minT + i * stepMs;
-      return { x: xAt(tAbs), label: formatElapsed(elapsedSec) };
-    });
+    const labelStepSec =
+      spanT >= 3600 * 1000 - 1000
+        ? TIME_LABEL_STEP_SEC_HOURLY
+        : spanT <= FIVE_MIN_MS + 1000
+          ? TIME_LABEL_STEP_SEC_5M
+          : TIME_LABEL_STEP_SEC_DEFAULT;
+    xLabelStepSecRef.current = labelStepSec;
+    const labelStepMs = labelStepSec * 1000;
+    const xTicks: Array<{ x: number; label: string }> = [];
+    let lastElapsedMs = -1;
+    for (let elapsedMs = 0; elapsedMs <= spanT + 1; elapsedMs += labelStepMs) {
+      const e = Math.min(elapsedMs, spanT);
+      const tAbs = minT + e;
+      xTicks.push({ x: xAt(tAbs), label: formatElapsed(e / 1000) });
+      lastElapsedMs = e;
+    }
+    if (spanT - lastElapsedMs > 1000) {
+      xTicks.push({ x: xAt(minT + spanT), label: formatElapsed(spanT / 1000) });
+    }
 
     return {
       up: upPts,
       down: downPts,
+      diff: diffPts,
       W,
       H,
       innerW,
       innerH,
       yTicks,
+      diffCenterY,
+      diffTicks,
       xTicks,
-      stepLabel: formatTimeStep(stepMs / 1000),
+      stepLabel: formatTimeStep(labelStepSec),
     };
   }, [points, clockMs, windowStartTs, windowEndTs]);
 
@@ -229,9 +293,10 @@ export function LivePriceChart({
     <div className="liveMidChart">
       {showHeader ? (
         <>
-          <h3>Live mid price</h3>
+          <h3>Live best ask</h3>
           <p className="liveMidChartLead muted small">
-            Same axis system as saved image: Y in 2¢ steps, X in 40 equal time divisions.
+            Same axis system as saved image: Y in 2¢ steps, X labels every{" "}
+            {formatTimeStep(xLabelStepSecRef.current)}.
           </p>
         </>
       ) : null}
@@ -245,17 +310,7 @@ export function LivePriceChart({
             <div className="liveMidChartLegend">
               <span className="liveMidChartLegUp">Up {fmtCents(last.up)}</span>
               <span className="liveMidChartLegDown">Down {fmtCents(last.down)}</span>
-              {typeof tokenDiffUsd === "number" && Number.isFinite(tokenDiffUsd) ? (
-                <span
-                  className={
-                    tokenDiffUsd >= 0
-                      ? "liveMidChartTokenDelta liveMidChartTokenDeltaUp"
-                      : "liveMidChartTokenDelta liveMidChartTokenDeltaDown"
-                  }
-                >
-                  {tokenDiffUsd >= 0 ? "▲" : "▼"} {fmtUsdAbs(tokenDiffUsd)}
-                </span>
-              ) : null}
+              {last.diffUsd != null ? <span className="liveMidChartLegDiff">Diff ${last.diffUsd.toFixed(2)}</span> : null}
               {typeof windowEndTs === "number" &&
               windowEndTs > 0 &&
               Number.isFinite(windowEndTs) ? (
@@ -326,6 +381,39 @@ export function LivePriceChart({
               strokeLinecap="round"
               points={svgPaths.down}
             />
+            {svgPaths.diff ? (
+              <polyline
+                fill="none"
+                stroke="#5fb6ff"
+                strokeWidth="1"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                points={svgPaths.diff}
+              />
+            ) : null}
+            {svgPaths.diffTicks.length > 0 ? (
+              <line
+                x1={PLOT.left}
+                y1={svgPaths.diffCenterY}
+                x2={PLOT.right}
+                y2={svgPaths.diffCenterY}
+                stroke="#36516f"
+                strokeWidth="1"
+                strokeDasharray="4 4"
+              />
+            ) : null}
+            {svgPaths.diffTicks.map((tick, i) => (
+              <text
+                key={`d-${i}`}
+                x={PLOT.right + 12}
+                y={tick.y + 4}
+                fill="#8fc9ff"
+                fontSize="10"
+                textAnchor="start"
+              >
+                {`${tick.v >= 0 ? "+" : ""}$${tick.v.toFixed(2)}`}
+              </text>
+            ))}
             <line
               x1={PLOT.left}
               y1={PLOT.bottom}
@@ -349,7 +437,7 @@ export function LivePriceChart({
               fontSize="12"
               textAnchor="middle"
             >
-              Time from window start — {TIME_DIVISIONS} equal parts, one tick every {svgPaths.stepLabel}
+              Time from window start — label every {svgPaths.stepLabel}
             </text>
             <text
               transform={`translate(22,${(PLOT.top + PLOT.bottom) / 2}) rotate(-90)`}
@@ -359,6 +447,16 @@ export function LivePriceChart({
             >
               Price (¢)
             </text>
+            {svgPaths.diffTicks.length > 0 ? (
+              <text
+                transform={`translate(${PLOT.right + 50},${(PLOT.top + PLOT.bottom) / 2}) rotate(90)`}
+                fill="#8fc9ff"
+                fontSize="13"
+                textAnchor="middle"
+              >
+                Token Diff ($)
+              </text>
+            ) : null}
           </svg>
         </div>
       )}

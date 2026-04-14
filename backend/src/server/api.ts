@@ -6,6 +6,7 @@ import type { ServerConfig } from "./config.js";
 import { strikeFromChainlinkBuffer } from "./chainlinkBuffer.js";
 import { fetchGammaStrikeContext } from "./services.js";
 import { formatWindowRangeEt } from "../shared/formatEtWindow.js";
+import { executeSimulation, type SideRule } from "./simEngine.js";
 
 /** sql.js / SQLite sometimes varies column name casing; avoid undefined → JSON omits key. */
 function rowStr(row: Record<string, unknown>, ...names: string[]): string {
@@ -152,5 +153,138 @@ export function createApi(db: AppDb, cfg: ServerConfig) {
   });
 
   app.use("/assets/screenshots", express.static(cfg.screenshotsDir));
+
+  app.post("/api/sim/run", async (req, res) => {
+    try {
+      const b = req.body as Record<string, unknown>;
+      const windowSlug = typeof b.windowSlug === "string" ? b.windowSlug.trim() : "";
+      const timeframe = typeof b.timeframe === "string" ? b.timeframe : "";
+      const symbol = typeof b.symbol === "string" ? b.symbol.trim().toUpperCase() : "";
+      const laneIndex = typeof b.laneIndex === "number" ? b.laneIndex : Number(b.laneIndex);
+      const threshold = typeof b.threshold === "number" ? b.threshold : Number(b.threshold);
+      const shares = typeof b.shares === "number" ? b.shares : Number(b.shares);
+      const entryDelaySec =
+        typeof b.entryDelaySec === "number" ? b.entryDelaySec : Number(b.entryDelaySec ?? 0);
+      const sideRule = (typeof b.sideRule === "string" ? b.sideRule : "both").toLowerCase() as SideRule;
+      if (!windowSlug) return res.status(400).json({ error: "windowSlug required" });
+      if (!timeframe || !symbol) return res.status(400).json({ error: "timeframe and symbol required" });
+      if (!Number.isFinite(laneIndex) || laneIndex < 0 || laneIndex > 7) {
+        return res.status(400).json({ error: "laneIndex must be 0–7" });
+      }
+      const out = await executeSimulation(db, {
+        windowSlug,
+        timeframe,
+        symbol,
+        laneIndex,
+        threshold,
+        shares,
+        entryDelaySec,
+        sideRule: sideRule === "up" || sideRule === "down" || sideRule === "both" ? sideRule : "both",
+      });
+      if (out.status === "error") return res.status(400).json(out);
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post("/api/sim/run-pending", async (req, res) => {
+    try {
+      const b = req.body as Record<string, unknown>;
+      const timeframe = typeof b.timeframe === "string" ? b.timeframe : "";
+      const symbol = typeof b.symbol === "string" ? b.symbol.trim().toUpperCase() : "";
+      const laneIndex = typeof b.laneIndex === "number" ? b.laneIndex : Number(b.laneIndex);
+      const threshold = typeof b.threshold === "number" ? b.threshold : Number(b.threshold);
+      const shares = typeof b.shares === "number" ? b.shares : Number(b.shares);
+      const entryDelaySec =
+        typeof b.entryDelaySec === "number" ? b.entryDelaySec : Number(b.entryDelaySec ?? 0);
+      const sideRule = (typeof b.sideRule === "string" ? b.sideRule : "both").toLowerCase() as SideRule;
+      const settleAfterSec =
+        typeof b.settleAfterSec === "number" ? b.settleAfterSec : Number(b.settleAfterSec ?? 120);
+      const maxRuns = typeof b.maxRuns === "number" ? b.maxRuns : Number(b.maxRuns ?? 8);
+      if (!timeframe || !symbol) return res.status(400).json({ error: "timeframe and symbol required" });
+      if (!Number.isFinite(laneIndex) || laneIndex < 0 || laneIndex > 7) {
+        return res.status(400).json({ error: "laneIndex must be 0–7" });
+      }
+      const after = Number.isFinite(settleAfterSec) && settleAfterSec >= 30 ? settleAfterSec : 120;
+      const cap = Number.isFinite(maxRuns) && maxRuns >= 1 ? Math.min(30, maxRuns) : 8;
+      const windows = db.getLatestWindows(timeframe, symbol) as Record<string, unknown>[];
+      const now = Math.floor(Date.now() / 1000);
+      const results: unknown[] = [];
+      let ran = 0;
+      for (const w of windows) {
+        if (results.length >= cap) break;
+        const slug = rowStr(w, "window_slug");
+        const endTs = rowNum(w, "end_ts");
+        if (!slug || endTs == null || endTs > now - after) continue;
+        if (db.hasSimResult(slug, laneIndex)) continue;
+        const out = await executeSimulation(db, {
+          windowSlug: slug,
+          timeframe: rowStr(w, "timeframe") || timeframe,
+          symbol: rowStr(w, "symbol") || symbol,
+          laneIndex,
+          threshold,
+          shares,
+          entryDelaySec,
+          sideRule: sideRule === "up" || sideRule === "down" || sideRule === "both" ? sideRule : "both",
+        });
+        if (out.status !== "error") ran += 1;
+        results.push(out);
+      }
+      res.json({ ran, results });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get("/api/sim/history", (req, res) => {
+    const timeframe = typeof req.query.timeframe === "string" ? req.query.timeframe : undefined;
+    const symbol = typeof req.query.symbol === "string" ? req.query.symbol : undefined;
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    const rows = db.listSimResults({ timeframe, symbol, limit }) as Record<string, unknown>[];
+    res.json(
+      rows.map((r) => ({
+        id: rowNum(r, "id") ?? 0,
+        created_at: rowNum(r, "created_at") ?? 0,
+        window_slug: rowStr(r, "window_slug"),
+        timeframe: rowStr(r, "timeframe"),
+        symbol: rowStr(r, "symbol"),
+        lane_index: rowNum(r, "lane_index") ?? 0,
+        threshold_p: rowNum(r, "threshold_p"),
+        shares: rowNum(r, "shares"),
+        side_rule: rowStr(r, "side_rule"),
+        timer_sec: rowNum(r, "timer_sec"),
+        entry_side: rowStr(r, "entry_side") || null,
+        entry_price: rowNum(r, "entry_price"),
+        entry_t: rowNum(r, "entry_t"),
+        strike_price: rowNum(r, "strike_price"),
+        final_price: rowNum(r, "final_price"),
+        last_up_p: rowNum(r, "last_up_p"),
+        last_down_p: rowNum(r, "last_down_p"),
+        outcome_won: rowNum(r, "outcome_won"),
+        pnl_usdc: rowNum(r, "pnl_usdc"),
+        status: rowStr(r, "status"),
+        error: rowStr(r, "error") || null,
+      }))
+    );
+  });
+
+  app.delete("/api/sim/history/:id", (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "invalid id" });
+    if (!db.deleteSimResult(id)) return res.status(404).json({ error: "not found" });
+    res.json({ ok: true });
+  });
+
+  app.delete("/api/sim/history", (req, res) => {
+    if (req.query.confirm !== "yes") {
+      return res.status(400).json({
+        error: "Refused: delete all requires query confirm=yes",
+      });
+    }
+    const deleted = db.deleteAllSimResults();
+    res.json({ ok: true, deleted });
+  });
+
   return app;
 }

@@ -19,7 +19,6 @@ type Props = {
 function fmtPriceAsCents(price: number): string {
   if (!Number.isFinite(price) || price < 0) return "—";
   const cents = price * 100;
-  if (cents >= 1) return `${Math.round(cents)}¢`;
   if (cents >= 0.1) return `${cents.toFixed(1)}¢`;
   return `${cents.toFixed(2)}¢`;
 }

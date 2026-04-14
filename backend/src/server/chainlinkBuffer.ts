@@ -49,3 +49,18 @@ export function strikeFromChainlinkBuffer(symbol: string, openSec: number): numb
   }
   return lastBefore?.value ?? null;
 }
+
+/** Read buffered Chainlink ticks inside [startSec, endSec] (unix seconds). */
+export function chainlinkTicksInRange(
+  symbol: string,
+  startSec: number,
+  endSec: number
+): Array<{ ts: number; value: number }> {
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) return [];
+  const startMs = startSec * 1000;
+  const endMs = endSec * 1000;
+  const arr = buffers.get(symbol.toUpperCase()) ?? [];
+  return arr
+    .filter((t) => t.ts >= startMs && t.ts <= endMs)
+    .map((t) => ({ ts: t.ts, value: t.value }));
+}

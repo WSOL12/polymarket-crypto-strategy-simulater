@@ -4,17 +4,28 @@ import puppeteer, { type Browser } from "puppeteer-core";
 import type { AppDb } from "./db.js";
 import type { ServerConfig } from "./config.js";
 import {
+  chainlinkTicksInRange,
+  strikeFromChainlinkBuffer,
+} from "./chainlinkBuffer.js";
+import { fetchGammaStrikeContext } from "./services.js";
+import {
   formatScreenshotFileStem,
   formatWindowRangeEt,
 } from "../shared/formatEtWindow.js";
 
 /** Vertical grid lines: elapsed time = (span / 40) × i, i = 0…40 (41 ticks). */
-const TIME_DIVISIONS = 40;
+const TIME_LABEL_STEP_SEC_DEFAULT = 30;
+const TIME_LABEL_STEP_SEC_HOURLY = 120;
+const TIME_LABEL_STEP_SEC_5M = 15;
+const FIVE_MIN_SEC = 5 * 60;
+const PRICE_GRID_STEPS = 50;
+const DIFF_USD_PER_GRID = 5; // 2 grids = $10
+const DIFF_MAX_ABS_USD = (PRICE_GRID_STEPS / 2) * DIFF_USD_PER_GRID; // +/-125
 
 /** Taller plot so 2¢ Y labels (~51 rows) do not overlap (~13px per row). */
 const PLOT = {
   left: 96,
-  right: 1188,
+  right: 1132,
   top: 64,
   bottom: 814,
 } as const;
@@ -87,7 +98,35 @@ function polylineSvg(
   return `<polyline fill="none" stroke="${color}" stroke-width="2" points="${mapped}" />`;
 }
 
-function axisAndGridSvg(minT: number, maxT: number, spanT: number): string {
+function polylineDiffSvg(
+  points: Array<{ t: number; d: number }>,
+  minT: number,
+  spanT: number,
+  maxAbsD: number
+): string {
+  if (!points.length || !Number.isFinite(maxAbsD) || maxAbsD <= 0) return "";
+  const centerY = (PLOT.top + PLOT.bottom) / 2;
+  const pxPerGrid = plotH() / PRICE_GRID_STEPS;
+  const yForD = (d: number) => {
+    const clamped = Math.max(-maxAbsD, Math.min(maxAbsD, d));
+    return centerY - (clamped / DIFF_USD_PER_GRID) * pxPerGrid;
+  };
+  const mapped = points
+    .map((pt) => {
+      const x = xForT(pt.t, minT, spanT);
+      const y = yForD(pt.d);
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  return `<polyline fill="none" stroke="#5fb6ff" stroke-width="3" points="${mapped}" />`;
+}
+
+function axisAndGridSvg(
+  minT: number,
+  maxT: number,
+  spanT: number,
+  diffAbsMax?: number | null
+): string {
   const parts: string[] = [];
   for (let cents = 0; cents <= 100; cents += 2) {
     const p = cents / 100;
@@ -99,16 +138,32 @@ function axisAndGridSvg(minT: number, maxT: number, spanT: number): string {
       `<text x="${PLOT.left - 8}" y="${y + 4}" fill="#aaa" font-size="10" text-anchor="end">${escapeXml(`${cents}¢`)}</text>`
     );
   }
-  const stepSec = spanT / TIME_DIVISIONS;
-  for (let i = 0; i <= TIME_DIVISIONS; i++) {
-    const elapsed = i * stepSec;
-    const tAbs = minT + elapsed;
+  const stepSec =
+    spanT >= 3600 - 1
+      ? TIME_LABEL_STEP_SEC_HOURLY
+      : spanT <= FIVE_MIN_SEC + 1
+        ? TIME_LABEL_STEP_SEC_5M
+        : TIME_LABEL_STEP_SEC_DEFAULT;
+  let lastElapsed = -1;
+  for (let elapsed = 0; elapsed <= spanT + 0.001; elapsed += stepSec) {
+    const e = Math.min(elapsed, spanT);
+    const tAbs = minT + e;
     const x = xForT(tAbs, minT, spanT);
     parts.push(
       `<line x1="${x.toFixed(1)}" y1="${PLOT.top}" x2="${x.toFixed(1)}" y2="${PLOT.bottom}" stroke="#2a2a2a" stroke-width="1" />`
     );
     parts.push(
-      `<text x="${x.toFixed(1)}" y="${PLOT.bottom + 16}" fill="#aaa" font-size="9" text-anchor="middle">${escapeXml(formatElapsed(elapsed))}</text>`
+      `<text x="${x.toFixed(1)}" y="${PLOT.bottom + 16}" fill="#aaa" font-size="9" text-anchor="middle">${escapeXml(formatElapsed(e))}</text>`
+    );
+    lastElapsed = e;
+  }
+  if (spanT - lastElapsed > 1) {
+    const x = xForT(minT + spanT, minT, spanT);
+    parts.push(
+      `<line x1="${x.toFixed(1)}" y1="${PLOT.top}" x2="${x.toFixed(1)}" y2="${PLOT.bottom}" stroke="#2a2a2a" stroke-width="1" />`
+    );
+    parts.push(
+      `<text x="${x.toFixed(1)}" y="${PLOT.bottom + 16}" fill="#aaa" font-size="9" text-anchor="middle">${escapeXml(formatElapsed(spanT))}</text>`
     );
   }
   parts.push(
@@ -117,9 +172,29 @@ function axisAndGridSvg(minT: number, maxT: number, spanT: number): string {
   parts.push(
     `<line x1="${PLOT.left}" y1="${PLOT.top}" x2="${PLOT.left}" y2="${PLOT.bottom}" stroke="#666" stroke-width="1.5" />`
   );
+  if (diffAbsMax != null && Number.isFinite(diffAbsMax) && diffAbsMax > 0) {
+    const centerY = (PLOT.top + PLOT.bottom) / 2;
+    const pxPerGrid = plotH() / PRICE_GRID_STEPS;
+    const start = Math.ceil((-diffAbsMax) / 10) * 10;
+    const end = Math.floor(diffAbsMax / 10) * 10;
+    for (let v = start; v <= end; v += 10) {
+      const y = centerY - (v / DIFF_USD_PER_GRID) * pxPerGrid;
+      if (y < PLOT.top + 12 || y > PLOT.bottom - 12) continue;
+      parts.push(
+        `<text x="${PLOT.right + 12}" y="${y + 4}" fill="#8fc9ff" font-size="10" text-anchor="start">${escapeXml(`${v >= 0 ? "+" : ""}$${v.toFixed(2)}`)}</text>`
+      );
+    }
+    parts.push(
+      `<line x1="${PLOT.left}" y1="${centerY.toFixed(1)}" x2="${PLOT.right}" y2="${centerY.toFixed(1)}" stroke="#36516f" stroke-width="1" stroke-dasharray="4 4" />`
+    );
+    const yMid = (PLOT.top + PLOT.bottom) / 2;
+    parts.push(
+      `<text transform="translate(${PLOT.right + 50},${yMid}) rotate(90)" fill="#8fc9ff" font-size="13" text-anchor="middle">Token Diff ($)</text>`
+    );
+  }
   const stepLabel = formatTimeStep(stepSec);
   parts.push(
-    `<text x="${(PLOT.left + PLOT.right) / 2}" y="${PLOT.bottom + 40}" fill="#888" font-size="12" text-anchor="middle">Time from window start — ${TIME_DIVISIONS} equal parts, one tick every ${escapeXml(stepLabel)}</text>`
+    `<text x="${(PLOT.left + PLOT.right) / 2}" y="${PLOT.bottom + 40}" fill="#888" font-size="12" text-anchor="middle">Time from window start — label every ${escapeXml(stepLabel)}</text>`
   );
   const yMid = (PLOT.top + PLOT.bottom) / 2;
   parts.push(
@@ -185,6 +260,7 @@ function extremaAnnotations(
 function buildSimpleHtml(
   up: Array<{ t: number; p: number }>,
   down: Array<{ t: number; p: number }>,
+  diff: Array<{ t: number; d: number }>,
   title: string,
   subtitle: string
 ) {
@@ -193,9 +269,24 @@ function buildSimpleHtml(
   const maxT = allT.length ? Math.max(...allT) : 1;
   const spanT = Math.max(1, maxT - minT);
 
-  const axes = axisAndGridSvg(minT, maxT, spanT);
-  const lines =
-    polylineSvg(up, "#21d07a", minT, spanT) + "\n" + polylineSvg(down, "#ff5a5f", minT, spanT);
+  const diffMinRaw = diff.length ? Math.min(...diff.map((x) => x.d)) : NaN;
+  const diffMaxRaw = diff.length ? Math.max(...diff.map((x) => x.d)) : NaN;
+  const hasDiffData = Number.isFinite(diffMinRaw) && Number.isFinite(diffMaxRaw);
+  const diffAbsMax = hasDiffData ? DIFF_MAX_ABS_USD : null;
+  const xLabelStepSec =
+    spanT >= 3600 - 1
+      ? TIME_LABEL_STEP_SEC_HOURLY
+      : spanT <= FIVE_MIN_SEC + 1
+        ? TIME_LABEL_STEP_SEC_5M
+        : TIME_LABEL_STEP_SEC_DEFAULT;
+  const xLabelStepText = formatTimeStep(xLabelStepSec);
+
+  const axes = axisAndGridSvg(minT, maxT, spanT, diffAbsMax);
+  const lines = [
+    polylineSvg(up, "#21d07a", minT, spanT),
+    polylineSvg(down, "#ff5a5f", minT, spanT),
+    diffAbsMax != null ? polylineDiffSvg(diff, minT, spanT, diffAbsMax) : "",
+  ].join("\n");
   const marks = extremaAnnotations(up, down, minT, spanT);
 
   return `<!doctype html>
@@ -206,7 +297,8 @@ function buildSimpleHtml(
   <div style="margin-top:10px;font-size:13px">
     <span style="color:#21d07a">● Up</span>
     <span style="margin-left:16px;color:#ff5a5f">● Down</span>
-    <span style="margin-left:16px;color:#888">Y: 0–100¢ (every 2¢) · X: elapsed (window ÷ ${TIME_DIVISIONS})</span>
+    ${diffAbsMax != null ? '<span style="margin-left:16px;color:#5fb6ff">● Token diff ($)</span>' : ""}
+    <span style="margin-left:16px;color:#888">Y: 0–100¢ (every 2¢) · X labels every ${xLabelStepText}</span>
   </div>
 </div>
 <svg width="1280" height="900" viewBox="0 0 1280 900" xmlns="http://www.w3.org/2000/svg">
@@ -286,7 +378,12 @@ export class ScreenshotWorker {
       end_ts: number;
     }>;
     for (const w of rows) {
-      const data = this.db.getSeries(w.window_slug) as Array<{ side: "Up" | "Down"; t: number; p: number }>;
+      // Screenshot must be based on WS best-ask samples only (not trade prints / other sources).
+      const data = this.db.getSeries(w.window_slug, undefined, "ws") as Array<{
+        side: "Up" | "Down";
+        t: number;
+        p: number;
+      }>;
       const up = data.filter((x) => x.side === "Up").map((x) => ({ t: x.t, p: x.p }));
       const down = data.filter((x) => x.side === "Down").map((x) => ({ t: x.t, p: x.p }));
       if (!up.length && !down.length) continue;
@@ -303,9 +400,34 @@ export class ScreenshotWorker {
       const fileName = `${stem}.${this.cfg.screenshotFormat}`;
       const outPath = path.join(this.cfg.screenshotsDir, fileName);
       const title = `${w.symbol} · ${w.timeframe} · ${readable}`;
-      const subtitle = "Up vs Down (mid from live stream & trades) · Eastern Time";
+      let strike: number | null = null;
+      try {
+        const ctx = await fetchGammaStrikeContext(this.cfg.gammaBaseUrl, w.window_slug);
+        strike = ctx.metadataStrike ?? null;
+      } catch {
+        strike = null;
+      }
+      if (strike == null && Number.isFinite(startTs) && startTs > 0) {
+        strike = strikeFromChainlinkBuffer(w.symbol, startTs);
+      }
+      const rangeTicks =
+        Number.isFinite(startTs) && Number.isFinite(endTs) && endTs > startTs
+          ? chainlinkTicksInRange(w.symbol, startTs, endTs)
+          : [];
+      // If strike metadata is missing, keep diff-line visible using first in-window tick as baseline.
+      if (strike == null && rangeTicks.length > 0) {
+        strike = rangeTicks[0]!.value;
+      }
+      const diff =
+        strike != null && rangeTicks.length > 0
+          ? rangeTicks.map((t) => ({
+              t: Math.floor(t.ts / 1000),
+              d: t.value - strike!,
+            }))
+          : [];
+      const subtitle = "Up/Down best ask + token diff (spot - strike) · Eastern Time";
       await this.renderToFile(
-        buildSimpleHtml(up, down, title, subtitle),
+        buildSimpleHtml(up, down, diff, title, subtitle),
         outPath,
         this.cfg.screenshotFormat
       );
