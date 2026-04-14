@@ -262,15 +262,38 @@ function buildSimpleHtml(
   down: Array<{ t: number; p: number }>,
   diff: Array<{ t: number; d: number }>,
   title: string,
-  subtitle: string
+  subtitle: string,
+  windowStartTs?: number,
+  windowEndTs?: number
 ) {
+  const hasWindowRange =
+    Number.isFinite(windowStartTs) &&
+    Number.isFinite(windowEndTs) &&
+    (windowEndTs as number) > (windowStartTs as number);
+  const rawMinT = hasWindowRange ? (windowStartTs as number) : 0;
+  const rawMaxT = hasWindowRange ? (windowEndTs as number) : 1;
   const allT = [...up.map((p) => p.t), ...down.map((p) => p.t)];
-  const minT = allT.length ? Math.min(...allT) : 0;
-  const maxT = allT.length ? Math.max(...allT) : 1;
+  const minT = hasWindowRange ? rawMinT : allT.length ? Math.min(...allT) : 0;
+  const maxT = hasWindowRange ? rawMaxT : allT.length ? Math.max(...allT) : 1;
   const spanT = Math.max(1, maxT - minT);
 
-  const diffMinRaw = diff.length ? Math.min(...diff.map((x) => x.d)) : NaN;
-  const diffMaxRaw = diff.length ? Math.max(...diff.map((x) => x.d)) : NaN;
+  const clampRange = <T extends { t: number }>(series: T[]): T[] =>
+    series
+      .filter((p) => p.t >= minT && p.t <= maxT)
+      .sort((a, b) => a.t - b.t);
+  const extendToEnd = <T extends { t: number }>(series: T[], endT: number): T[] => {
+    if (!series.length) return series;
+    const last = series[series.length - 1]!;
+    if (last.t >= endT) return series;
+    return [...series, { ...last, t: endT }];
+  };
+
+  const upIn = extendToEnd(clampRange(up), maxT);
+  const downIn = extendToEnd(clampRange(down), maxT);
+  const diffIn = extendToEnd(clampRange(diff), maxT);
+
+  const diffMinRaw = diffIn.length ? Math.min(...diffIn.map((x) => x.d)) : NaN;
+  const diffMaxRaw = diffIn.length ? Math.max(...diffIn.map((x) => x.d)) : NaN;
   const hasDiffData = Number.isFinite(diffMinRaw) && Number.isFinite(diffMaxRaw);
   const diffAbsMax = hasDiffData ? DIFF_MAX_ABS_USD : null;
   const xLabelStepSec =
@@ -283,11 +306,11 @@ function buildSimpleHtml(
 
   const axes = axisAndGridSvg(minT, maxT, spanT, diffAbsMax);
   const lines = [
-    polylineSvg(up, "#21d07a", minT, spanT),
-    polylineSvg(down, "#ff5a5f", minT, spanT),
-    diffAbsMax != null ? polylineDiffSvg(diff, minT, spanT, diffAbsMax) : "",
+    polylineSvg(upIn, "#21d07a", minT, spanT),
+    polylineSvg(downIn, "#ff5a5f", minT, spanT),
+    diffAbsMax != null ? polylineDiffSvg(diffIn, minT, spanT, diffAbsMax) : "",
   ].join("\n");
-  const marks = extremaAnnotations(up, down, minT, spanT);
+  const marks = extremaAnnotations(upIn, downIn, minT, spanT);
 
   return `<!doctype html>
 <html><body style="margin:0;background:#111;color:#eee;font-family:system-ui,Segoe UI,Arial,sans-serif">
@@ -427,7 +450,7 @@ export class ScreenshotWorker {
           : [];
       const subtitle = "Up/Down best ask + token diff (spot - strike) · Eastern Time";
       await this.renderToFile(
-        buildSimpleHtml(up, down, diff, title, subtitle),
+        buildSimpleHtml(up, down, diff, title, subtitle, startTs, endTs),
         outPath,
         this.cfg.screenshotFormat
       );
