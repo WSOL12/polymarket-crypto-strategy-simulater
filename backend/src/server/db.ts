@@ -66,6 +66,7 @@ export class AppDb {
         shares REAL NOT NULL,
         side_rule TEXT NOT NULL,
         timer_sec INTEGER NOT NULL DEFAULT 0,
+        token_diff_limit_p REAL,
         entry_side TEXT,
         entry_price REAL,
         entry_t INTEGER,
@@ -109,6 +110,10 @@ export class AppDb {
       }
       if (!names.has("last_down_p")) {
         this.db.run(`ALTER TABLE sim_results ADD COLUMN last_down_p REAL`);
+        this.dirty = true;
+      }
+      if (!names.has("token_diff_limit_p")) {
+        this.db.run(`ALTER TABLE sim_results ADD COLUMN token_diff_limit_p REAL`);
         this.dirty = true;
       }
     } catch {
@@ -236,6 +241,7 @@ export class AppDb {
     shares: number;
     sideRule: string;
     timerSec: number;
+    tokenDiffLimitP: number | null;
     entrySide: string | null;
     entryPrice: number | null;
     entryT: number | null;
@@ -253,10 +259,10 @@ export class AppDb {
     this.db.run(
       `INSERT INTO sim_results (
         created_at, window_slug, timeframe, symbol, lane_index, threshold_p, shares, side_rule,
-        timer_sec,
+        timer_sec, token_diff_limit_p,
         entry_side, entry_price, entry_t, strike_price, final_price, last_up_p, last_down_p,
         outcome_won, pnl_usdc, status, error
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         now,
         row.windowSlug,
@@ -267,6 +273,7 @@ export class AppDb {
         row.shares,
         row.sideRule,
         Math.max(0, Math.floor(row.timerSec)),
+        row.tokenDiffLimitP,
         row.entrySide,
         row.entryPrice,
         row.entryT,

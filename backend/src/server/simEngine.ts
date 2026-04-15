@@ -17,6 +17,15 @@ function eligible(side: "Up" | "Down", sideRule: SideRule): boolean {
   return side === "Down";
 }
 
+function latestAtOrBefore(series: PointLike[], t: number): number | null {
+  let v: number | null = null;
+  for (const row of series) {
+    if (!Number.isFinite(row.t) || row.t > t) break;
+    if (Number.isFinite(row.p)) v = row.p;
+  }
+  return v;
+}
+
 /**
  * First time an eligible side's price is at or above threshold (best-ask style series),
  * constrained to rows at/after `notBeforeTs` when provided.
@@ -27,7 +36,8 @@ export function findFirstCross(
   down: PointLike[],
   threshold: number,
   sideRule: SideRule,
-  notBeforeTs: number | null = null
+  notBeforeTs: number | null = null,
+  tokenDiffLimitP: number | null = null
 ): PointLike | null {
   const cands: PointLike[] = [];
   for (const row of up) {
@@ -52,7 +62,14 @@ export function findFirstCross(
   }
   if (cands.length === 0) return null;
   cands.sort((a, b) => (a.t !== b.t ? a.t - b.t : a.side.localeCompare(b.side)));
-  return cands[0] ?? null;
+  if (tokenDiffLimitP == null) return cands[0] ?? null;
+  for (const c of cands) {
+    const upAt = c.side === "Up" ? c.p : latestAtOrBefore(up, c.t);
+    const downAt = c.side === "Down" ? c.p : latestAtOrBefore(down, c.t);
+    if (upAt == null || downAt == null) continue;
+    if (Math.abs(upAt - downAt) <= tokenDiffLimitP) return c;
+  }
+  return null;
 }
 
 /** Strictly above 99¢ (0.99). */
@@ -98,6 +115,7 @@ export type SimRunInput = {
   shares: number;
   sideRule: SideRule;
   entryDelaySec: number;
+  tokenDiffLimitP: number | null;
 };
 
 export type SimRunOutput = {
@@ -111,6 +129,7 @@ export type SimRunOutput = {
   shares: number;
   sideRule: SideRule;
   entryDelaySec: number;
+  tokenDiffLimitP: number | null;
   entrySide: "Up" | "Down" | null;
   entryPrice: number | null;
   entryT: number | null;
@@ -135,6 +154,7 @@ export function executeSimulation(db: AppDb, input: SimRunInput): SimRunOutput {
     shares: input.shares,
     sideRule: input.sideRule,
     entryDelaySec: input.entryDelaySec,
+    tokenDiffLimitP: input.tokenDiffLimitP,
     entrySide: null,
     entryPrice: null,
     entryT: null,
@@ -157,6 +177,12 @@ export function executeSimulation(db: AppDb, input: SimRunInput): SimRunOutput {
   }
   if (!Number.isFinite(input.entryDelaySec) || input.entryDelaySec < 0) {
     return baseErr("entryDelaySec must be >= 0");
+  }
+  if (
+    input.tokenDiffLimitP != null &&
+    (!Number.isFinite(input.tokenDiffLimitP) || input.tokenDiffLimitP < 0 || input.tokenDiffLimitP > 1)
+  ) {
+    return baseErr("tokenDiffLimitP must be between 0 and 1 (or null to disable)");
   }
 
   const up = db.getSeries(input.windowSlug, "Up") as PointLike[];
@@ -188,7 +214,14 @@ export function executeSimulation(db: AppDb, input: SimRunInput): SimRunOutput {
     // Fallback when end timestamp is unavailable.
     notBeforeTs = Math.floor(startTs + input.entryDelaySec);
   }
-  const cross = findFirstCross(up, down, input.threshold, input.sideRule, notBeforeTs);
+  const cross = findFirstCross(
+    up,
+    down,
+    input.threshold,
+    input.sideRule,
+    notBeforeTs,
+    input.tokenDiffLimitP
+  );
 
   const rowBase = {
     windowSlug: input.windowSlug,
@@ -199,6 +232,7 @@ export function executeSimulation(db: AppDb, input: SimRunInput): SimRunOutput {
     shares: input.shares,
     sideRule: input.sideRule,
     timerSec: Math.floor(input.entryDelaySec),
+    tokenDiffLimitP: input.tokenDiffLimitP,
     strikePrice: null as number | null,
     finalPrice: null as number | null,
     lastUpP,
@@ -227,6 +261,7 @@ export function executeSimulation(db: AppDb, input: SimRunInput): SimRunOutput {
       shares: input.shares,
       sideRule: input.sideRule,
       entryDelaySec: input.entryDelaySec,
+      tokenDiffLimitP: input.tokenDiffLimitP,
       entrySide: null,
       entryPrice: null,
       entryT: null,
@@ -265,6 +300,7 @@ export function executeSimulation(db: AppDb, input: SimRunInput): SimRunOutput {
       shares: input.shares,
       sideRule: input.sideRule,
       entryDelaySec: input.entryDelaySec,
+      tokenDiffLimitP: input.tokenDiffLimitP,
       entrySide,
       entryPrice,
       entryT: cross.t,
@@ -301,6 +337,7 @@ export function executeSimulation(db: AppDb, input: SimRunInput): SimRunOutput {
     shares: input.shares,
     sideRule: input.sideRule,
     entryDelaySec: input.entryDelaySec,
+    tokenDiffLimitP: input.tokenDiffLimitP,
     entrySide,
     entryPrice,
     entryT: cross.t,

@@ -97,6 +97,7 @@ export type SimRunRequest = {
   shares: number;
   sideRule: SimSideRule;
   entryDelaySec: number;
+  tokenDiffLimitP: number | null;
 };
 
 export type SimRunResponse = {
@@ -110,6 +111,7 @@ export type SimRunResponse = {
   shares: number;
   sideRule: SimSideRule;
   entryDelaySec: number;
+  tokenDiffLimitP: number | null;
   entrySide: "Up" | "Down" | null;
   entryPrice: number | null;
   entryT: number | null;
@@ -132,6 +134,7 @@ export type SimHistoryRow = {
   shares: number | null;
   side_rule: string;
   timer_sec: number | null;
+  token_diff_limit_p: number | null;
   entry_side: string | null;
   entry_price: number | null;
   entry_t: number | null;
@@ -186,6 +189,7 @@ export const api = {
     shares: number;
     sideRule: SimSideRule;
     entryDelaySec?: number;
+    tokenDiffLimitP?: number | null;
     settleAfterSec?: number;
     maxRuns?: number;
   }) => jPost<SimRunPendingResponse>("/api/sim/run-pending", body),

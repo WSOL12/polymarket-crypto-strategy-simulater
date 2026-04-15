@@ -10,18 +10,25 @@ type LaneConfig = {
   timerSec: number;
   shares: number;
   sideRule: SimSideRule;
+  tokenDiffLimitCents: number | null;
 };
 
 const DEFAULT_LANES: LaneConfig[] = [
-  { laneIndex: 0, label: "Lane A", cents: 96, timerSec: 0, shares: 1, sideRule: "both" },
-  { laneIndex: 1, label: "Lane B", cents: 97, timerSec: 0, shares: 1, sideRule: "both" },
-  { laneIndex: 2, label: "Lane C", cents: 98, timerSec: 0, shares: 1, sideRule: "both" },
-  { laneIndex: 3, label: "Lane D", cents: 99, timerSec: 0, shares: 1, sideRule: "both" },
+  { laneIndex: 0, label: "Lane A", cents: 96, timerSec: 0, shares: 1, sideRule: "both", tokenDiffLimitCents: null },
+  { laneIndex: 1, label: "Lane B", cents: 97, timerSec: 0, shares: 1, sideRule: "both", tokenDiffLimitCents: null },
+  { laneIndex: 2, label: "Lane C", cents: 98, timerSec: 0, shares: 1, sideRule: "both", tokenDiffLimitCents: null },
+  { laneIndex: 3, label: "Lane D", cents: 99, timerSec: 0, shares: 1, sideRule: "both", tokenDiffLimitCents: null },
 ];
 
 function centsToThreshold(cents: number): number {
   const c = Math.round(cents);
   return Math.min(0.99, Math.max(0.01, c / 100));
+}
+
+function diffLimitCentsToParam(cents: number | null): number | null {
+  if (cents == null || !Number.isFinite(cents)) return null;
+  const c = Math.max(0, Math.min(100, cents));
+  return c / 100;
 }
 
 function fmtUsd(n: number | null | undefined): string {
@@ -53,6 +60,11 @@ function fmtEventTime(ts: number | null | undefined): string {
 }
 
 function fmtAsk(p: number | null | undefined): string {
+  if (p == null || !Number.isFinite(p)) return "—";
+  return `${(p * 100).toFixed(1)}¢`;
+}
+
+function fmtDiffLimit(p: number | null | undefined): string {
   if (p == null || !Number.isFinite(p)) return "—";
   return `${(p * 100).toFixed(1)}¢`;
 }
@@ -247,6 +259,7 @@ export function StrategySimPage() {
             shares: lane.shares,
             sideRule: lane.sideRule,
             entryDelaySec: lane.timerSec,
+            tokenDiffLimitP: diffLimitCentsToParam(lane.tokenDiffLimitCents),
             settleAfterSec: 120,
             maxRuns: 6,
           });
@@ -286,6 +299,7 @@ export function StrategySimPage() {
         shares: L.shares,
         sideRule: L.sideRule,
         entryDelaySec: L.timerSec,
+        tokenDiffLimitP: diffLimitCentsToParam(L.tokenDiffLimitCents),
       });
       await loadHistory();
     } catch (e) {
@@ -331,6 +345,8 @@ export function StrategySimPage() {
           Four <strong>independent</strong> lanes. Each buys when its threshold is first hit (best-ask
           series): <em>Up only</em>, <em>Down only</em>, or <em>both</em> (whichever crosses first). Entry
           timer uses the reverse countdown clock: checks start at <code>window end − timerSec</code>{" "}
+          and optional <strong>token price diff limit</strong> only allows entry when{" "}
+          <code>|Up ask − Down ask| ≤ limit</code> at that moment.{" "}
           (so <code>200s</code> means only the last 200s of the window).{" "}
           <strong>Winner</strong> is decided from the <strong>last</strong> Up and Down asks in that
           window: <strong>Up</strong> wins if last Up is <strong>above 99¢</strong> and last Down is not;
@@ -457,6 +473,27 @@ export function StrategySimPage() {
                 />
               </label>
               <label>
+                Token price diff limit (¢)
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  placeholder="disabled"
+                  value={lane.tokenDiffLimitCents ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value.trim();
+                    if (!raw) {
+                      setLane(i, { tokenDiffLimitCents: null });
+                      return;
+                    }
+                    const n = Number(raw);
+                    if (!Number.isFinite(n)) return;
+                    setLane(i, { tokenDiffLimitCents: Math.max(0, Math.min(100, n)) });
+                  }}
+                />
+              </label>
+              <label>
                 Side rule
                 <select
                   value={lane.sideRule}
@@ -488,7 +525,7 @@ export function StrategySimPage() {
             <p className="muted small strategyLaneHint">
               <strong>Run</strong> evaluates the selected window once. <strong>Start auto</strong> waits for
               live WSS window updates, then runs settled windows missing a row for this lane (same
-              threshold/timer/shares/rule).
+              threshold/timer/shares/rule/diff limit).
             </p>
           </article>
         ))}
@@ -512,6 +549,7 @@ export function StrategySimPage() {
                 <th>Window</th>
                 <th>Thr</th>
                 <th>Timer</th>
+                <th>Diff limit</th>
                 <th>Shares</th>
                 <th>Rule</th>
                 <th>Entry</th>
@@ -527,7 +565,7 @@ export function StrategySimPage() {
             <tbody>
               {history.length === 0 ? (
                 <tr>
-                  <td colSpan={15} className="muted">
+                  <td colSpan={16} className="muted">
                     No rows yet. Run a lane above (backend needs <code>price_events</code> for that window).
                   </td>
                 </tr>
@@ -543,6 +581,7 @@ export function StrategySimPage() {
                       {row.threshold_p != null ? `${(row.threshold_p * 100).toFixed(0)}¢` : "—"}
                     </td>
                     <td>{row.timer_sec != null ? `${Math.max(0, Math.floor(row.timer_sec))}s` : "0s"}</td>
+                    <td>{fmtDiffLimit(row.token_diff_limit_p)}</td>
                     <td>{row.shares ?? "—"}</td>
                     <td>{row.side_rule}</td>
                     <td>

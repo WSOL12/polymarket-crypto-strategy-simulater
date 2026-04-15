@@ -165,6 +165,12 @@ export function createApi(db: AppDb, cfg: ServerConfig) {
       const shares = typeof b.shares === "number" ? b.shares : Number(b.shares);
       const entryDelaySec =
         typeof b.entryDelaySec === "number" ? b.entryDelaySec : Number(b.entryDelaySec ?? 0);
+      const tokenDiffLimitP =
+        b.tokenDiffLimitP == null
+          ? null
+          : typeof b.tokenDiffLimitP === "number"
+            ? b.tokenDiffLimitP
+            : Number(b.tokenDiffLimitP);
       const sideRule = (typeof b.sideRule === "string" ? b.sideRule : "both").toLowerCase() as SideRule;
       if (!windowSlug) return res.status(400).json({ error: "windowSlug required" });
       if (!timeframe || !symbol) return res.status(400).json({ error: "timeframe and symbol required" });
@@ -179,6 +185,7 @@ export function createApi(db: AppDb, cfg: ServerConfig) {
         threshold,
         shares,
         entryDelaySec,
+        tokenDiffLimitP: tokenDiffLimitP != null && Number.isFinite(tokenDiffLimitP) ? tokenDiffLimitP : null,
         sideRule: sideRule === "up" || sideRule === "down" || sideRule === "both" ? sideRule : "both",
       });
       if (out.status === "error") return res.status(400).json(out);
@@ -198,6 +205,12 @@ export function createApi(db: AppDb, cfg: ServerConfig) {
       const shares = typeof b.shares === "number" ? b.shares : Number(b.shares);
       const entryDelaySec =
         typeof b.entryDelaySec === "number" ? b.entryDelaySec : Number(b.entryDelaySec ?? 0);
+      const tokenDiffLimitP =
+        b.tokenDiffLimitP == null
+          ? null
+          : typeof b.tokenDiffLimitP === "number"
+            ? b.tokenDiffLimitP
+            : Number(b.tokenDiffLimitP);
       const sideRule = (typeof b.sideRule === "string" ? b.sideRule : "both").toLowerCase() as SideRule;
       const settleAfterSec =
         typeof b.settleAfterSec === "number" ? b.settleAfterSec : Number(b.settleAfterSec ?? 120);
@@ -226,6 +239,8 @@ export function createApi(db: AppDb, cfg: ServerConfig) {
           threshold,
           shares,
           entryDelaySec,
+          tokenDiffLimitP:
+            tokenDiffLimitP != null && Number.isFinite(tokenDiffLimitP) ? tokenDiffLimitP : null,
           sideRule: sideRule === "up" || sideRule === "down" || sideRule === "both" ? sideRule : "both",
         });
         if (out.status !== "error") ran += 1;
@@ -254,6 +269,7 @@ export function createApi(db: AppDb, cfg: ServerConfig) {
         shares: rowNum(r, "shares"),
         side_rule: rowStr(r, "side_rule"),
         timer_sec: rowNum(r, "timer_sec"),
+        token_diff_limit_p: rowNum(r, "token_diff_limit_p"),
         entry_side: rowStr(r, "entry_side") || null,
         entry_price: rowNum(r, "entry_price"),
         entry_t: rowNum(r, "entry_t"),
