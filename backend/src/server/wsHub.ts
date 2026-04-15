@@ -157,14 +157,6 @@ function streamKeyForClient(st: ClientState, fallbackSymbol: string): string {
   return `${sym}:${tf}`;
 }
 
-function parseStreamKey(key: string): { symbol: string; timeframe: string } {
-  const [symbolRaw, timeframeRaw] = key.split(":");
-  return {
-    symbol: (symbolRaw || "").toUpperCase(),
-    timeframe: timeframeRaw || "15m",
-  };
-}
-
 export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfig) {
   /** Bind with `server` + `path` so `ws` owns the upgrade (manual handleUpgrade + Express often drops the socket). */
   const wss = new WebSocketServer({
@@ -181,7 +173,6 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
   /** Which sockets listen to each stream (Set avoids double-count if the same tab re-sends subscribe). */
   const clobSubscribers = new Map<string, Set<WebSocket>>();
   const clobStreamPromises = new Map<string, Promise<ClobStreamEntry | null>>();
-  let clobRefreshInFlight = false;
 
   const ensureRtds = (symbol: string) => {
     const sym = symbol || cfg.symbol;
@@ -411,63 +402,6 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
     );
   };
 
-  /**
-   * Keep each active `SYMBOL:timeframe` stream aligned to the latest window's token IDs.
-   * Without this, a long-lived stream can keep old tokens after rollover.
-   */
-  const refreshActiveClobStreams = async () => {
-    if (clobRefreshInFlight) return;
-    clobRefreshInFlight = true;
-    try {
-      for (const [streamKey, entry] of clobStreams) {
-        const subs = clobSubscribers.get(streamKey);
-        if (!subs || subs.size === 0) continue;
-        const { symbol, timeframe } = parseStreamKey(streamKey);
-        if (!symbol) continue;
-        let latest: { tracked: TrackedWindow | null; tokens: UpDownTokens | null } | null = null;
-        try {
-          latest = await fetchTrackedWindowAndTokens(cfg, timeframe, symbol);
-        } catch {
-          continue;
-        }
-        const tokens = latest?.tokens;
-        if (!tokens) continue;
-        if (latest?.tracked) db.upsertWindow(latest.tracked);
-
-        const tokenChanged =
-          tokens.up !== entry.clobUpTokenId || tokens.down !== entry.clobDownTokenId;
-        if (!tokenChanged) {
-          if (latest?.tracked) entry.activeTrackedWindow = latest.tracked;
-          continue;
-        }
-
-        entry.clob.stop();
-        const nextEntry: ClobStreamEntry = {
-          clob: new ClobMarketClient([tokens.up, tokens.down], makeClobHandler(streamKey)),
-          snap: emptySnap(),
-          activeTrackedWindow: latest?.tracked ?? null,
-          lastWsBestAskRecordAt: { Up: 0, Down: 0 },
-          clobUpTokenId: tokens.up,
-          clobDownTokenId: tokens.down,
-        };
-        clobStreams.set(streamKey, nextEntry);
-        nextEntry.clob.start();
-
-        for (const client of subs) {
-          if (client.readyState !== WebSocket.OPEN) continue;
-          void sendClobStreamStatus(client, timeframe, symbol).then(() =>
-            pushClobSnapshotToClient(client, streamKey)
-          );
-        }
-      }
-    } finally {
-      clobRefreshInFlight = false;
-    }
-  };
-  const clobRefreshTimer = setInterval(() => {
-    void refreshActiveClobStreams();
-  }, 7000);
-
   wss.on("connection", (ws) => {
     clients.set(ws, {});
     if (ws.readyState === WebSocket.OPEN) {
@@ -567,7 +501,6 @@ export function attachRealtimeWs(server: HttpServer, db: AppDb, cfg: ServerConfi
   });
 
   return () => {
-    clearInterval(clobRefreshTimer);
     rtds?.stop();
     rtds = null;
     rtdsSymbol = null;

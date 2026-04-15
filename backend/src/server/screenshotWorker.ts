@@ -118,7 +118,7 @@ function polylineDiffSvg(
       return `${x.toFixed(2)},${y.toFixed(2)}`;
     })
     .join(" ");
-  return `<polyline fill="none" stroke="#5fb6ff" stroke-width="3" points="${mapped}" />`;
+  return `<polyline fill="none" stroke="#5fb6ff" stroke-width="1.5" points="${mapped}" />`;
 }
 
 function axisAndGridSvg(

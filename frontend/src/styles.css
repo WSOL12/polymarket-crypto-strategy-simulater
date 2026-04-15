@@ -669,7 +669,7 @@ a {
   flex-direction: row;
   align-items: center;
   justify-content: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.35em;
   min-height: 4.25rem;
   padding: 0.85rem 1rem;
@@ -716,11 +716,24 @@ button.askStripBtn:active:not(:disabled) {
   border-color: rgba(255, 255, 255, 0.06);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
+/* Keep "Up 1.0¢" / "Down 100.0¢" on one line so the price never inherits a solo row at full pill size */
+.askStripLine {
+  display: inline-flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.35em;
+  max-width: 100%;
+  white-space: nowrap;
+}
 .askStripLabel {
   opacity: 0.98;
+  flex-shrink: 0;
 }
 .askStripPrice {
   font-weight: 800;
+  flex-shrink: 0;
 }
 .askStripHint {
   margin: 8px 0 0;
@@ -739,11 +752,15 @@ button.askStripBtn:active:not(:disabled) {
 .askStripHeader .askStripInner {
   gap: 8px;
 }
+.askStripHeader .askStripInner > * {
+  min-width: 0;
+}
 .askStripHeader .askStripPill {
   min-height: 3.35rem;
   padding: 0.55rem 0.7rem;
   border-radius: 12px;
-  font-size: clamp(1.12rem, 2.5vw, 1.6rem);
+  /* Cap size so long quotes (e.g. 100.0¢) stay on one line inside the header grid */
+  font-size: clamp(0.88rem, 2.1vw, 1.32rem);
 }
 
 /* Live mid price (Up / Down) time series */

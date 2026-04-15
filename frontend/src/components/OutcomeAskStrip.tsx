@@ -65,13 +65,17 @@ export function OutcomeAskStrip({
       aria-selected={tablist ? selected === "up" : selected === "up"}
       onClick={() => onSelect!("up")}
     >
-      <span className="askStripLabel">Up</span>
-      <span className="askStripPrice">{upLabel}</span>
+      <span className="askStripLine">
+        <span className="askStripLabel">Up</span>
+        <span className="askStripPrice">{upLabel}</span>
+      </span>
     </button>
   ) : (
     <div className={pillClass("up", selected)}>
-      <span className="askStripLabel">Up</span>
-      <span className="askStripPrice">{upLabel}</span>
+      <span className="askStripLine">
+        <span className="askStripLabel">Up</span>
+        <span className="askStripPrice">{upLabel}</span>
+      </span>
     </div>
   );
 
@@ -84,13 +88,17 @@ export function OutcomeAskStrip({
       aria-selected={tablist ? selected === "down" : undefined}
       onClick={() => onSelect!("down")}
     >
-      <span className="askStripLabel">Down</span>
-      <span className="askStripPrice">{downLabel}</span>
+      <span className="askStripLine">
+        <span className="askStripLabel">Down</span>
+        <span className="askStripPrice">{downLabel}</span>
+      </span>
     </button>
   ) : (
     <div className={pillClass("down", selected)}>
-      <span className="askStripLabel">Down</span>
-      <span className="askStripPrice">{downLabel}</span>
+      <span className="askStripLine">
+        <span className="askStripLabel">Down</span>
+        <span className="askStripPrice">{downLabel}</span>
+      </span>
     </div>
   );
 
