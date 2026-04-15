@@ -79,7 +79,6 @@ function inferWinner(row: SimHistoryRow): string {
 export function StrategySimPage() {
   const [timeframe, setTimeframe] = useState("15m");
   const [symbol, setSymbol] = useState("BTC");
-  const [windowSlug, setWindowSlug] = useState("");
   const [windows, setWindows] = useState<WindowRow[]>([]);
   const [lanes, setLanes] = useState<LaneConfig[]>(() => DEFAULT_LANES.map((l) => ({ ...l })));
   const [history, setHistory] = useState<SimHistoryRow[]>([]);
@@ -108,16 +107,13 @@ export function StrategySimPage() {
   lanesRef.current = lanes;
   const wsRef = useRef<WebSocket | null>(null);
   const autoRunWindowKeyRef = useRef<string>("");
+  const latestWindowSlug = windows[0]?.window_slug ?? "";
 
   const loadWindows = useCallback(async () => {
     try {
       setError("");
       const w = await api.windows(timeframe, symbol);
       setWindows(w);
-      setWindowSlug((prev) => {
-        if (prev && w.some((x) => x.window_slug === prev)) return prev;
-        return w[0]?.window_slug ?? "";
-      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load windows");
     }
@@ -143,6 +139,14 @@ export function StrategySimPage() {
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      void loadWindows();
+      void loadHistory();
+    }, 10000);
+    return () => clearInterval(t);
+  }, [loadWindows, loadHistory]);
 
   useEffect(() => {
     if (!streaming) {
@@ -282,8 +286,9 @@ export function StrategySimPage() {
   };
 
   const runLane = async (i: number) => {
-    if (!windowSlug.trim()) {
-      setError("Select a market window (slug) first.");
+    const runSlug = latestWindowSlug.trim();
+    if (!runSlug) {
+      setError("No latest window available yet for this timeframe/symbol.");
       return;
     }
     const L = lanes[i];
@@ -291,7 +296,7 @@ export function StrategySimPage() {
     setError("");
     try {
       await api.simRun({
-        windowSlug: windowSlug.trim(),
+        windowSlug: runSlug,
         timeframe,
         symbol,
         laneIndex: L.laneIndex,
@@ -376,29 +381,17 @@ export function StrategySimPage() {
               <option value="SOL">SOL</option>
             </select>
           </label>
-          <label className="strategyWindowSelect">
-            Window
-            <select
-              value={windowSlug}
-              onChange={(e) => setWindowSlug(e.target.value)}
-              title="Gamma / DB window slug"
-            >
-              <option value="">— select —</option>
-              {windows.map((w) => (
-                <option key={w.window_slug} value={w.window_slug}>
-                  {w.window_slug.slice(0, 48)}
-                  {w.window_slug.length > 48 ? "…" : ""} ({w.start_ts}→{w.end_ts})
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="strategyWindowSelect">
+            <span className="muted small">Latest window (auto)</span>
+            <code title={latestWindowSlug || "No window yet"}>
+              {latestWindowSlug
+                ? latestWindowSlug.length > 56
+                  ? `${latestWindowSlug.slice(0, 56)}…`
+                  : latestWindowSlug
+                : "— waiting for latest window —"}
+            </code>
+          </div>
           <div className="strategyMarketActions">
-            <button type="button" className="btn" onClick={() => void loadWindows()}>
-              Refresh windows
-            </button>
-            <button type="button" className="btn" onClick={() => void loadHistory()} disabled={historyBusy}>
-              Refresh history
-            </button>
             <button
               type="button"
               className={streaming ? "btn btnStop" : "btn btnStart"}
@@ -408,6 +401,9 @@ export function StrategySimPage() {
             </button>
           </div>
         </div>
+        <p className="muted small">
+          Windows and history auto-refresh every 10s. Lane runs always target the latest window.
+        </p>
         {wsStreamNote ? <p className="muted small">{wsStreamNote}</p> : null}
         {wsError ? <div className="error">{wsError}</div> : null}
       </section>
