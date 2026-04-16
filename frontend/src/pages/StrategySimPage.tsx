@@ -234,6 +234,10 @@ export function StrategySimPage() {
   const liveIdRef = useRef(-1);
   const latestWindowSlug = windows[0]?.window_slug ?? "";
   const shownHistory = simulationMode === "live" ? liveHistory : history;
+  const totalPnlUsdc = shownHistory.reduce((acc, row) => {
+    const v = row.pnl_usdc;
+    return v != null && Number.isFinite(v) ? acc + v : acc;
+  }, 0);
 
   const loadWindows = useCallback(async () => {
     try {
@@ -888,6 +892,7 @@ export function StrategySimPage() {
           <h2 className="strategySectionTitle">
             {simulationMode === "db" ? "Simulation history (SQLite)" : "Simulation history (Live WSS, UI)"}
           </h2>
+          <span className={totalPnlUsdc >= 0 ? "pnlPos" : "pnlNeg"}>Total PnL: {fmtUsd(totalPnlUsdc)}</span>
           <button type="button" className="btn btnStop" onClick={() => void clearAll()}>
             Clear all…
           </button>
