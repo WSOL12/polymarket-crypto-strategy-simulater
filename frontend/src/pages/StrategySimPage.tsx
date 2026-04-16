@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type SideClobSnapshot, type SimHistoryRow, type SimSideRule, type WindowRow } from "../api";
+import {
+  api,
+  type ScreenshotRow,
+  type SideClobSnapshot,
+  type SimHistoryRow,
+  type SimSideRule,
+  type WindowRow,
+} from "../api";
 import { LiveChart } from "../components/LiveChart";
 import { backendWebSocketUrl } from "../wsUrl";
 
@@ -12,6 +19,34 @@ type LaneConfig = {
   sideRule: SimSideRule;
   tokenDiffLimitCents: number | null;
 };
+
+type SimulationMode = "db" | "live";
+
+type LiveWindowState = { startTs: number; endTs: number; windowSlug: string | null };
+
+type LivePendingRun = {
+  laneIndex: number;
+  threshold: number;
+  shares: number;
+  sideRule: SimSideRule;
+  timerSec: number;
+  tokenDiffLimitP: number | null;
+  createdAt: number;
+};
+
+type LiveRuntime = {
+  key: string;
+  timeframe: string;
+  symbol: string;
+  windowSlug: string;
+  startTs: number;
+  endTs: number;
+  up: Array<{ t: number; p: number }>;
+  down: Array<{ t: number; p: number }>;
+  pending: LivePendingRun[];
+};
+
+type ScreenshotLink = { id: number; fileName: string };
 
 const DEFAULT_LANES: LaneConfig[] = [
   { laneIndex: 0, label: "Lane A", cents: 96, timerSec: 0, shares: 1, sideRule: "both", tokenDiffLimitCents: null },
@@ -76,12 +111,98 @@ function inferWinner(row: SimHistoryRow): string {
   return row.entry_side === "Up" ? "Down" : "Up";
 }
 
+function isFailedPrediction(row: SimHistoryRow): boolean {
+  if (row.status === "settled") return row.outcome_won === 0;
+  return row.status === "no_cross" || row.status === "inconclusive" || row.status === "error";
+}
+
+function liveWindowKey(w: LiveWindowState): string {
+  const slug = w.windowSlug?.trim();
+  if (slug) return `${slug}:${w.startTs}-${w.endTs}`;
+  return `${w.startTs}-${w.endTs}`;
+}
+
+function lastSidePrice(series: Array<{ t: number; p: number }>): number | null {
+  if (series.length === 0) return null;
+  const last = series[series.length - 1];
+  return last && Number.isFinite(last.p) ? last.p : null;
+}
+
+function latestAtOrBefore(series: Array<{ t: number; p: number }>, t: number): number | null {
+  let v: number | null = null;
+  for (const row of series) {
+    if (!Number.isFinite(row.t) || row.t > t) break;
+    if (Number.isFinite(row.p)) v = row.p;
+  }
+  return v;
+}
+
+function isEligibleSide(side: "Up" | "Down", sideRule: SimSideRule): boolean {
+  if (sideRule === "both") return true;
+  if (sideRule === "up") return side === "Up";
+  return side === "Down";
+}
+
+function findFirstCrossLive(
+  up: Array<{ t: number; p: number }>,
+  down: Array<{ t: number; p: number }>,
+  threshold: number,
+  sideRule: SimSideRule,
+  notBeforeTs: number | null,
+  tokenDiffLimitP: number | null
+): { side: "Up" | "Down"; t: number; p: number } | null {
+  const cands: Array<{ side: "Up" | "Down"; t: number; p: number }> = [];
+  for (const row of up) {
+    if (
+      Number.isFinite(row.p) &&
+      row.p >= threshold &&
+      isEligibleSide("Up", sideRule) &&
+      (notBeforeTs == null || row.t >= notBeforeTs)
+    ) {
+      cands.push({ side: "Up", t: row.t, p: row.p });
+    }
+  }
+  for (const row of down) {
+    if (
+      Number.isFinite(row.p) &&
+      row.p >= threshold &&
+      isEligibleSide("Down", sideRule) &&
+      (notBeforeTs == null || row.t >= notBeforeTs)
+    ) {
+      cands.push({ side: "Down", t: row.t, p: row.p });
+    }
+  }
+  if (cands.length === 0) return null;
+  cands.sort((a, b) => (a.t !== b.t ? a.t - b.t : a.side.localeCompare(b.side)));
+  if (tokenDiffLimitP == null) return cands[0] ?? null;
+  for (const c of cands) {
+    const upAt = c.side === "Up" ? c.p : latestAtOrBefore(up, c.t);
+    const downAt = c.side === "Down" ? c.p : latestAtOrBefore(down, c.t);
+    if (upAt == null || downAt == null) continue;
+    if (Math.abs(upAt - downAt) <= tokenDiffLimitP) return c;
+  }
+  return null;
+}
+
+function winningOutcomeLive(lastUp: number | null, lastDown: number | null): "Up" | "Down" | null {
+  if (lastUp == null || lastDown == null) return null;
+  const upHi = lastUp > 0.99;
+  const downHi = lastDown > 0.99;
+  if (upHi && !downHi) return "Up";
+  if (downHi && !upHi) return "Down";
+  if (upHi && downHi) return lastUp >= lastDown ? "Up" : "Down";
+  return null;
+}
+
 export function StrategySimPage() {
+  const [simulationMode, setSimulationMode] = useState<SimulationMode>("db");
   const [timeframe, setTimeframe] = useState("15m");
   const [symbol, setSymbol] = useState("BTC");
   const [windows, setWindows] = useState<WindowRow[]>([]);
   const [lanes, setLanes] = useState<LaneConfig[]>(() => DEFAULT_LANES.map((l) => ({ ...l })));
   const [history, setHistory] = useState<SimHistoryRow[]>([]);
+  const [liveHistory, setLiveHistory] = useState<SimHistoryRow[]>([]);
+  const [screenshotByWindow, setScreenshotByWindow] = useState<Record<string, ScreenshotLink>>({});
   const [error, setError] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [wsError, setWsError] = useState("");
@@ -93,7 +214,7 @@ export function StrategySimPage() {
     up: { orderbook: null, bestBidAsk: null },
     down: { orderbook: null, bestBidAsk: null },
   });
-  const [liveWindow, setLiveWindow] = useState<{ startTs: number; endTs: number } | null>(null);
+  const [liveWindow, setLiveWindow] = useState<LiveWindowState | null>(null);
   const [busy, setBusy] = useState<Record<number, boolean>>({});
   const [historyBusy, setHistoryBusy] = useState(false);
   const [autoArmed, setAutoArmed] = useState<[boolean, boolean, boolean, boolean]>([
@@ -105,9 +226,14 @@ export function StrategySimPage() {
 
   const lanesRef = useRef(lanes);
   lanesRef.current = lanes;
+  const simulationModeRef = useRef<SimulationMode>(simulationMode);
+  simulationModeRef.current = simulationMode;
   const wsRef = useRef<WebSocket | null>(null);
   const autoRunWindowKeyRef = useRef<string>("");
+  const liveRuntimeRef = useRef<LiveRuntime | null>(null);
+  const liveIdRef = useRef(-1);
   const latestWindowSlug = windows[0]?.window_slug ?? "";
+  const shownHistory = simulationMode === "live" ? liveHistory : history;
 
   const loadWindows = useCallback(async () => {
     try {
@@ -132,6 +258,147 @@ export function StrategySimPage() {
     }
   }, [timeframe, symbol]);
 
+  const loadScreenshots = useCallback(async () => {
+    try {
+      const rows = await api.screenshots(timeframe, symbol);
+      const map: Record<string, ScreenshotLink> = {};
+      for (const r of rows as ScreenshotRow[]) {
+        const slug = r.window_slug?.trim();
+        if (!slug) continue;
+        if (!map[slug] || r.id > map[slug]!.id) {
+          map[slug] = { id: r.id, fileName: r.file_name || "screenshot" };
+        }
+      }
+      setScreenshotByWindow(map);
+    } catch {
+      // Keep page usable even if screenshot list fails.
+    }
+  }, [timeframe, symbol]);
+
+  const appendLiveRows = useCallback((rows: SimHistoryRow[]) => {
+    if (rows.length === 0) return;
+    setLiveHistory((prev) => [...rows, ...prev].slice(0, 400));
+  }, []);
+
+  const settleLiveRuntime = useCallback(
+    (rt: LiveRuntime) => {
+      if (rt.pending.length === 0) return;
+      const up = [...rt.up].sort((a, b) => a.t - b.t);
+      const down = [...rt.down].sort((a, b) => a.t - b.t);
+      const lastUp = lastSidePrice(up);
+      const lastDown = lastSidePrice(down);
+      const outRows: SimHistoryRow[] = [];
+      for (const run of rt.pending) {
+        const timerSec = Math.max(0, Math.floor(run.timerSec));
+        const notBeforeTs = timerSec === 0 ? rt.startTs : Math.max(rt.startTs, rt.endTs - timerSec);
+        const cross = findFirstCrossLive(
+          up,
+          down,
+          run.threshold,
+          run.sideRule,
+          notBeforeTs,
+          run.tokenDiffLimitP
+        );
+        let status: SimHistoryRow["status"] = "no_cross";
+        let entry_side: string | null = null;
+        let entry_price: number | null = null;
+        let entry_t: number | null = null;
+        let outcome_won: number | null = null;
+        let pnl_usdc: number | null = 0;
+        let err: string | null = null;
+        if (cross) {
+          entry_side = cross.side;
+          entry_price = Math.min(1, Math.max(0, cross.p));
+          entry_t = cross.t;
+          const winner = winningOutcomeLive(lastUp, lastDown);
+          if (winner == null) {
+            status = "inconclusive";
+            pnl_usdc = null;
+            err = "Neither last Up nor last Down ask ended above 99¢; cannot pick a winner from prices.";
+          } else {
+            status = "settled";
+            const won = entry_side === winner;
+            outcome_won = won ? 1 : 0;
+            pnl_usdc = won ? run.shares * (1 - entry_price) : -run.shares * entry_price;
+          }
+        }
+        const id = liveIdRef.current--;
+        outRows.push({
+          id,
+          created_at: run.createdAt,
+          window_slug: rt.windowSlug,
+          timeframe: rt.timeframe,
+          symbol: rt.symbol,
+          lane_index: run.laneIndex,
+          threshold_p: run.threshold,
+          shares: run.shares,
+          side_rule: run.sideRule,
+          timer_sec: timerSec,
+          token_diff_limit_p: run.tokenDiffLimitP,
+          entry_side,
+          entry_price,
+          entry_t,
+          strike_price: null,
+          final_price: null,
+          last_up_p: lastUp,
+          last_down_p: lastDown,
+          outcome_won,
+          pnl_usdc,
+          status,
+          error: err,
+        });
+      }
+      appendLiveRows(outRows);
+    },
+    [appendLiveRows]
+  );
+
+  const ensureLiveRuntime = useCallback(
+    (w: LiveWindowState): LiveRuntime => {
+      const key = liveWindowKey(w);
+      const current = liveRuntimeRef.current;
+      if (current && current.key === key) return current;
+      if (current && current.key !== key) settleLiveRuntime(current);
+      const next: LiveRuntime = {
+        key,
+        timeframe,
+        symbol,
+        windowSlug: w.windowSlug ?? key,
+        startTs: w.startTs,
+        endTs: w.endTs,
+        up: [],
+        down: [],
+        pending: [],
+      };
+      liveRuntimeRef.current = next;
+      return next;
+    },
+    [settleLiveRuntime, timeframe, symbol]
+  );
+
+  const queueLiveRuns = useCallback(
+    (laneList: LaneConfig[]) => {
+      if (!liveWindow) {
+        setError("Live WSS window is not available yet. Start live stream first.");
+        return;
+      }
+      const rt = ensureLiveRuntime(liveWindow);
+      const now = Date.now();
+      for (const lane of laneList) {
+        rt.pending.push({
+          laneIndex: lane.laneIndex,
+          threshold: centsToThreshold(lane.cents),
+          shares: lane.shares,
+          sideRule: lane.sideRule,
+          timerSec: lane.timerSec,
+          tokenDiffLimitP: diffLimitCentsToParam(lane.tokenDiffLimitCents),
+          createdAt: now,
+        });
+      }
+    },
+    [liveWindow, ensureLiveRuntime]
+  );
+
   useEffect(() => {
     void loadWindows();
   }, [loadWindows]);
@@ -141,12 +408,17 @@ export function StrategySimPage() {
   }, [loadHistory]);
 
   useEffect(() => {
+    void loadScreenshots();
+  }, [loadScreenshots]);
+
+  useEffect(() => {
     const t = setInterval(() => {
       void loadWindows();
       void loadHistory();
+      void loadScreenshots();
     }, 10000);
     return () => clearInterval(t);
-  }, [loadWindows, loadHistory]);
+  }, [loadWindows, loadHistory, loadScreenshots]);
 
   useEffect(() => {
     if (!streaming) {
@@ -188,7 +460,10 @@ export function StrategySimPage() {
           else if (u === "no_tokens") setWsStreamNote("Up/Down: no outcome token IDs.");
           else setWsStreamNote("Up/Down stream unavailable.");
 
-          const w = data.window as { startTs?: number; endTs?: number } | null | undefined;
+          const w = data.window as
+            | { startTs?: number; endTs?: number; windowSlug?: string | null }
+            | null
+            | undefined;
           if (
             w &&
             typeof w.startTs === "number" &&
@@ -197,7 +472,11 @@ export function StrategySimPage() {
             Number.isFinite(w.endTs) &&
             w.endTs > w.startTs
           ) {
-            setLiveWindow({ startTs: w.startTs, endTs: w.endTs });
+            setLiveWindow({
+              startTs: w.startTs,
+              endTs: w.endTs,
+              windowSlug: typeof w.windowSlug === "string" ? w.windowSlug : null,
+            });
           } else {
             setLiveWindow(null);
           }
@@ -211,10 +490,28 @@ export function StrategySimPage() {
         }
 
         if (data.type === "clob_snapshot") {
-          setClobSnap({
+          const nextSnap = {
             up: data.up as SideClobSnapshot,
             down: data.down as SideClobSnapshot,
-          });
+          };
+          setClobSnap(nextSnap);
+          if (simulationModeRef.current === "live" && liveRuntimeRef.current) {
+            const rt = liveRuntimeRef.current;
+            const upAsk = nextSnap.up.bestBidAsk?.bestAsk;
+            const downAsk = nextSnap.down.bestBidAsk?.bestAsk;
+            const upTs = nextSnap.up.bestBidAsk?.t;
+            const downTs = nextSnap.down.bestBidAsk?.t;
+            if (typeof upAsk === "number" && Number.isFinite(upAsk) && Number.isFinite(upTs)) {
+              const tSec = Math.floor((upTs as number) > 1e12 ? (upTs as number) / 1000 : (upTs as number));
+              rt.up.push({ t: tSec, p: upAsk });
+            }
+            if (typeof downAsk === "number" && Number.isFinite(downAsk) && Number.isFinite(downTs)) {
+              const tSec = Math.floor(
+                (downTs as number) > 1e12 ? (downTs as number) / 1000 : (downTs as number)
+              );
+              rt.down.push({ t: tSec, p: downAsk });
+            }
+          }
           return;
         }
 
@@ -245,8 +542,14 @@ export function StrategySimPage() {
   }, [streaming, timeframe, symbol]);
 
   useEffect(() => {
+    if (simulationMode !== "live") return;
+    if (!liveWindow) return;
+    void ensureLiveRuntime(liveWindow);
+  }, [simulationMode, liveWindow, ensureLiveRuntime]);
+
+  useEffect(() => {
     if (!streaming || !liveWindow) return;
-    const key = `${timeframe}:${symbol}:${liveWindow.startTs}-${liveWindow.endTs}`;
+    const key = `${timeframe}:${symbol}:${liveWindowKey(liveWindow)}`;
     if (autoRunWindowKeyRef.current === key) return;
     autoRunWindowKeyRef.current = key;
 
@@ -254,6 +557,10 @@ export function StrategySimPage() {
       try {
         const toRun = lanesRef.current.filter((_, i) => autoArmed[i]);
         if (toRun.length === 0) return;
+        if (simulationMode === "live") {
+          queueLiveRuns(toRun);
+          return;
+        }
         for (const lane of toRun) {
           await api.simRunPending({
             timeframe,
@@ -264,7 +571,7 @@ export function StrategySimPage() {
             sideRule: lane.sideRule,
             entryDelaySec: lane.timerSec,
             tokenDiffLimitP: diffLimitCentsToParam(lane.tokenDiffLimitCents),
-            settleAfterSec: 120,
+            settleAfterSec: 5,
             maxRuns: 6,
           });
         }
@@ -275,7 +582,7 @@ export function StrategySimPage() {
     };
 
     void run();
-  }, [autoArmed, streaming, liveWindow, timeframe, symbol, loadHistory]);
+  }, [autoArmed, streaming, liveWindow, timeframe, symbol, loadHistory, simulationMode, queueLiveRuns]);
 
   const setLane = (i: number, patch: Partial<LaneConfig>) => {
     setLanes((prev) => {
@@ -286,17 +593,21 @@ export function StrategySimPage() {
   };
 
   const runLane = async (i: number) => {
-    const runSlug = latestWindowSlug.trim();
-    if (!runSlug) {
-      setError("No latest window available yet for this timeframe/symbol.");
+    if (simulationMode === "live") {
+      if (!streaming) {
+        setError("Live WSS simulation requires live stream ON.");
+        return;
+      }
+      const lane = lanes[i];
+      queueLiveRuns([lane]);
+      setError("");
       return;
     }
     const L = lanes[i];
     setBusy((b) => ({ ...b, [L.laneIndex]: true }));
     setError("");
     try {
-      await api.simRun({
-        windowSlug: runSlug,
+      const out = await api.simRunPending({
         timeframe,
         symbol,
         laneIndex: L.laneIndex,
@@ -305,8 +616,14 @@ export function StrategySimPage() {
         sideRule: L.sideRule,
         entryDelaySec: L.timerSec,
         tokenDiffLimitP: diffLimitCentsToParam(L.tokenDiffLimitCents),
+        settleAfterSec: 0,
+        maxRuns: 0,
+        fromOldest: true,
       });
       await loadHistory();
+      if (!out.ran) {
+        setError("No pending settled windows to simulate for this lane.");
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Run failed");
     } finally {
@@ -323,6 +640,10 @@ export function StrategySimPage() {
   };
 
   const deleteRow = async (id: number) => {
+    if (simulationMode === "live") {
+      setLiveHistory((prev) => prev.filter((r) => r.id !== id));
+      return;
+    }
     try {
       await api.simDelete(id);
       await loadHistory();
@@ -332,6 +653,12 @@ export function StrategySimPage() {
   };
 
   const clearAll = async () => {
+    if (simulationMode === "live") {
+      if (!window.confirm("Clear all UI live simulation rows?")) return;
+      setLiveHistory([]);
+      setError("");
+      return;
+    }
     if (!window.confirm("Delete all simulation history rows from the database?")) return;
     try {
       await api.simClearAll();
@@ -350,7 +677,8 @@ export function StrategySimPage() {
           Four <strong>independent</strong> lanes. Each buys when its threshold is first hit (best-ask
           series): <em>Up only</em>, <em>Down only</em>, or <em>both</em> (whichever crosses first). Entry
           timer uses the reverse countdown clock: checks start at <code>window end − timerSec</code>{" "}
-          and optional <strong>token price diff limit</strong> only allows entry when{" "}
+          (<code>0s</code> means check the <strong>full window</strong>) and optional{" "}
+          <strong>token price diff limit</strong> only allows entry when{" "}
           <code>|Up ask − Down ask| ≤ limit</code> at that moment.{" "}
           (so <code>200s</code> means only the last 200s of the window).{" "}
           <strong>Winner</strong> is decided from the <strong>last</strong> Up and Down asks in that
@@ -381,6 +709,20 @@ export function StrategySimPage() {
               <option value="SOL">SOL</option>
             </select>
           </label>
+          <label>
+            Simulation source
+            <select
+              value={simulationMode}
+              onChange={(e) => {
+                const next = e.target.value as SimulationMode;
+                setSimulationMode(next);
+                autoRunWindowKeyRef.current = "";
+              }}
+            >
+              <option value="db">SQLite DB (backend)</option>
+              <option value="live">Live WSS (UI runtime)</option>
+            </select>
+          </label>
           <div className="strategyWindowSelect">
             <span className="muted small">Latest window (auto)</span>
             <code title={latestWindowSlug || "No window yet"}>
@@ -402,7 +744,9 @@ export function StrategySimPage() {
           </div>
         </div>
         <p className="muted small">
-          Windows and history auto-refresh every 10s. Lane runs always target the latest window.
+          {simulationMode === "db"
+            ? "DB mode: windows/history auto-refresh every 10s; Run simulation backfills settled windows from oldest to newest."
+            : "Live mode: lane runs are queued for the current WSS window and settled when that window rolls."}
         </p>
         {wsStreamNote ? <p className="muted small">{wsStreamNote}</p> : null}
         {wsError ? <div className="error">{wsError}</div> : null}
@@ -467,6 +811,7 @@ export function StrategySimPage() {
                   value={lane.timerSec}
                   onChange={(e) => setLane(i, { timerSec: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
                 />
+                <small className="muted">0 = full window</small>
               </label>
               <label>
                 Token price diff limit (¢)
@@ -508,7 +853,7 @@ export function StrategySimPage() {
                 disabled={!!busy[lane.laneIndex]}
                 onClick={() => void runLane(i)}
               >
-                Run simulation
+                {simulationMode === "live" ? "Queue live run" : "Run simulation"}
               </button>
               <button
                 type="button"
@@ -519,9 +864,18 @@ export function StrategySimPage() {
               </button>
             </div>
             <p className="muted small strategyLaneHint">
-              <strong>Run</strong> evaluates the selected window once. <strong>Start auto</strong> waits for
-              live WSS window updates, then runs settled windows missing a row for this lane (same
-              threshold/timer/shares/rule/diff limit).
+              {simulationMode === "db" ? (
+                <>
+                  <strong>Run</strong> backfills this lane across settled windows from oldest to newest.
+                  <strong> Start auto</strong> waits for live WSS window updates, then runs settled windows
+                  missing a row for this lane (same threshold/timer/shares/rule/diff limit).
+                </>
+              ) : (
+                <>
+                  <strong>Queue live run</strong> registers this lane on the current WSS window.
+                  <strong> Start auto</strong> registers runs for each new live window.
+                </>
+              )}
             </p>
           </article>
         ))}
@@ -531,7 +885,9 @@ export function StrategySimPage() {
 
       <section className="panel simHistoryPanel">
         <div className="simHistoryToolbar">
-          <h2 className="strategySectionTitle">Simulation history (SQLite)</h2>
+          <h2 className="strategySectionTitle">
+            {simulationMode === "db" ? "Simulation history (SQLite)" : "Simulation history (Live WSS, UI)"}
+          </h2>
           <button type="button" className="btn btnStop" onClick={() => void clearAll()}>
             Clear all…
           </button>
@@ -540,6 +896,7 @@ export function StrategySimPage() {
           <table className="simHistoryTable">
             <thead>
               <tr>
+                <th>No</th>
                 <th>When</th>
                 <th>Lane</th>
                 <th>Window</th>
@@ -555,19 +912,23 @@ export function StrategySimPage() {
                 <th>Winner</th>
                 <th>Status</th>
                 <th>PnL</th>
+                <th>Shot</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              {history.length === 0 ? (
+              {shownHistory.length === 0 ? (
                 <tr>
-                  <td colSpan={16} className="muted">
-                    No rows yet. Run a lane above (backend needs <code>price_events</code> for that window).
+                  <td colSpan={18} className="muted">
+                    {simulationMode === "db"
+                      ? "No rows yet. Run a lane above (backend needs price_events for that window)."
+                      : "No rows yet. Start live stream, then queue lane runs for the current window."}
                   </td>
                 </tr>
               ) : (
-                history.map((row) => (
+                shownHistory.map((row, idx) => (
                   <tr key={row.id}>
+                    <td>{shownHistory.length - idx}</td>
                     <td>{fmtTime(row.created_at)}</td>
                     <td>{row.lane_index}</td>
                     <td className="simSlugCell" title={row.window_slug}>
@@ -592,6 +953,23 @@ export function StrategySimPage() {
                     <td>{row.status}</td>
                     <td className={row.pnl_usdc != null && row.pnl_usdc >= 0 ? "pnlPos" : "pnlNeg"}>
                       {row.pnl_usdc != null ? fmtUsd(row.pnl_usdc) : "—"}
+                    </td>
+                    <td>
+                      {(() => {
+                        const shot = screenshotByWindow[row.window_slug];
+                        if (!shot) return "—";
+                        const failed = isFailedPrediction(row);
+                        return (
+                          <a
+                            href={`/api/screenshots/${shot.id}/file`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className={failed ? "failShotLink" : undefined}
+                          >
+                            {failed ? "Fail shot" : "Open"}
+                          </a>
+                        );
+                      })()}
                     </td>
                     <td>
                       <button type="button" className="btn btnSmall" onClick={() => void deleteRow(row.id)}>

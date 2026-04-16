@@ -192,6 +192,7 @@ export const api = {
     tokenDiffLimitP?: number | null;
     settleAfterSec?: number;
     maxRuns?: number;
+    fromOldest?: boolean;
   }) => jPost<SimRunPendingResponse>("/api/sim/run-pending", body),
 
   simHistory: (timeframe?: string, symbol?: string, limit?: number) =>

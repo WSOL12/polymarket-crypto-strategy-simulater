@@ -213,15 +213,20 @@ export function createApi(db: AppDb, cfg: ServerConfig) {
             : Number(b.tokenDiffLimitP);
       const sideRule = (typeof b.sideRule === "string" ? b.sideRule : "both").toLowerCase() as SideRule;
       const settleAfterSec =
-        typeof b.settleAfterSec === "number" ? b.settleAfterSec : Number(b.settleAfterSec ?? 120);
+        typeof b.settleAfterSec === "number" ? b.settleAfterSec : Number(b.settleAfterSec ?? 5);
       const maxRuns = typeof b.maxRuns === "number" ? b.maxRuns : Number(b.maxRuns ?? 8);
+      const fromOldest = b.fromOldest === true;
       if (!timeframe || !symbol) return res.status(400).json({ error: "timeframe and symbol required" });
       if (!Number.isFinite(laneIndex) || laneIndex < 0 || laneIndex > 7) {
         return res.status(400).json({ error: "laneIndex must be 0–7" });
       }
-      const after = Number.isFinite(settleAfterSec) && settleAfterSec >= 30 ? settleAfterSec : 120;
-      const cap = Number.isFinite(maxRuns) && maxRuns >= 1 ? Math.min(30, maxRuns) : 8;
-      const windows = db.getLatestWindows(timeframe, symbol) as Record<string, unknown>[];
+      const after = Number.isFinite(settleAfterSec) && settleAfterSec >= 0 ? settleAfterSec : 5;
+      const cap = Number.isFinite(maxRuns) && maxRuns >= 1 ? Math.floor(Math.min(5000, maxRuns)) : Infinity;
+      const windows = db.listWindows({
+        timeframe,
+        symbol,
+        order: fromOldest ? "asc" : "desc",
+      }) as Record<string, unknown>[];
       const now = Math.floor(Date.now() / 1000);
       const results: unknown[] = [];
       let ran = 0;

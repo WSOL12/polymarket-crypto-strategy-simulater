@@ -191,6 +191,36 @@ export class AppDb {
     );
   }
 
+  listWindows(filters: {
+    timeframe?: string;
+    symbol?: string;
+    order?: "asc" | "desc";
+    limit?: number | null;
+  }) {
+    this.assertReady();
+    const parts = ["1=1"];
+    const params: unknown[] = [];
+    if (filters.timeframe) {
+      parts.push("timeframe=?");
+      params.push(filters.timeframe);
+    }
+    if (filters.symbol) {
+      parts.push("symbol=?");
+      params.push(filters.symbol);
+    }
+    const order = filters.order === "asc" ? "ASC" : "DESC";
+    const rawLimit = filters.limit;
+    const limit =
+      rawLimit != null && Number.isFinite(rawLimit) && Number(rawLimit) > 0
+        ? Math.floor(Number(rawLimit))
+        : null;
+    const sql =
+      `SELECT * FROM windows WHERE ${parts.join(" AND ")} ORDER BY start_ts ${order}` +
+      (limit != null ? " LIMIT ?" : "");
+    if (limit != null) params.push(limit);
+    return this.query(sql, params);
+  }
+
   getSeries(windowSlug: string, side?: string, source?: string) {
     this.assertReady();
     const parts = ["window_slug=?"];

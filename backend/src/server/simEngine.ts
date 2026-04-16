@@ -206,13 +206,20 @@ export function executeSimulation(db: AppDb, input: SimRunInput): SimRunOutput {
         : NaN;
   // Timer is based on reverse countdown: unlock when remaining time <= entryDelaySec.
   // Example: 200s means begin checking entries from (window_end - 200s).
+  // Special case: 0 means no timer restriction (check full window), which is
+  // the expected "default immediate" behavior in the UI.
   let notBeforeTs: number | null = null;
+  const delaySec = Math.max(0, Math.floor(input.entryDelaySec));
   if (Number.isFinite(endTs)) {
-    notBeforeTs = Math.floor(endTs - input.entryDelaySec);
-    if (Number.isFinite(startTs)) notBeforeTs = Math.max(Math.floor(startTs), notBeforeTs);
+    if (delaySec === 0) {
+      notBeforeTs = Number.isFinite(startTs) ? Math.floor(startTs) : null;
+    } else {
+      notBeforeTs = Math.floor(endTs - delaySec);
+      if (Number.isFinite(startTs)) notBeforeTs = Math.max(Math.floor(startTs), notBeforeTs);
+    }
   } else if (Number.isFinite(startTs)) {
     // Fallback when end timestamp is unavailable.
-    notBeforeTs = Math.floor(startTs + input.entryDelaySec);
+    notBeforeTs = delaySec === 0 ? Math.floor(startTs) : Math.floor(startTs + delaySec);
   }
   const cross = findFirstCross(
     up,

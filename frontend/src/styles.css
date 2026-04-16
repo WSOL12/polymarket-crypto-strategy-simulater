@@ -1017,6 +1017,13 @@ button.askStripBtn:active:not(:disabled) {
   color: #ff8a8e;
   font-weight: 600;
 }
+.failShotLink {
+  color: #ff6b6b;
+  font-weight: 600;
+}
+.failShotLink:hover {
+  color: #ff8a8e;
+}
 .btnSmall {
   padding: 4px 10px;
   font-size: 12px;
