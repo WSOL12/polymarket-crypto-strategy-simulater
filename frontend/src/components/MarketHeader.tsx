@@ -153,7 +153,7 @@ export function MarketHeader(props: Props) {
   const cur = props.currentPrice;
   const delta =
     beat != null && cur != null && Number.isFinite(beat) && Number.isFinite(cur)
-      ? cur - beat
+      ? beat - cur
       : null;
 
   const deltaAbsFmt =

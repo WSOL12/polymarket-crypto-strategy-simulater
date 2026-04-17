@@ -14,7 +14,7 @@ type Props = {
   /** Optional prediction window bounds (unix seconds). */
   windowStartTs?: number | null;
   windowEndTs?: number | null;
-  /** Current token USD difference (Current Price - Price To Beat). */
+  /** Current token USD difference (Price To Beat - Current Price). */
   tokenDiffUsd?: number | null;
   /** When false, hide title/help text to save vertical space. */
   showHeader?: boolean;

@@ -25,6 +25,7 @@ type SimulationMode = "db" | "live";
 type LiveWindowState = { startTs: number; endTs: number; windowSlug: string | null };
 
 type LivePendingRun = {
+  id: number;
   laneIndex: number;
   threshold: number;
   shares: number;
@@ -229,6 +230,7 @@ export function StrategySimPage() {
   const simulationModeRef = useRef<SimulationMode>(simulationMode);
   simulationModeRef.current = simulationMode;
   const wsRef = useRef<WebSocket | null>(null);
+  const liveResubscribeWindowKeyRef = useRef("");
   const autoRunWindowKeyRef = useRef<string>("");
   const liveRuntimeRef = useRef<LiveRuntime | null>(null);
   const liveIdRef = useRef(-1);
@@ -241,7 +243,6 @@ export function StrategySimPage() {
 
   const loadWindows = useCallback(async () => {
     try {
-      setError("");
       const w = await api.windows(timeframe, symbol);
       setWindows(w);
     } catch (e) {
@@ -252,7 +253,6 @@ export function StrategySimPage() {
   const loadHistory = useCallback(async () => {
     try {
       setHistoryBusy(true);
-      setError("");
       const h = await api.simHistory(timeframe, symbol, 400);
       setHistory(h);
     } catch (e) {
@@ -281,7 +281,12 @@ export function StrategySimPage() {
 
   const appendLiveRows = useCallback((rows: SimHistoryRow[]) => {
     if (rows.length === 0) return;
-    setLiveHistory((prev) => [...rows, ...prev].slice(0, 400));
+    setLiveHistory((prev) => {
+      const byId = new Map<number, SimHistoryRow>();
+      for (const row of prev) byId.set(row.id, row);
+      for (const row of rows) byId.set(row.id, row);
+      return [...byId.values()].sort((a, b) => b.created_at - a.created_at).slice(0, 400);
+    });
   }, []);
 
   const settleLiveRuntime = useCallback(
@@ -326,7 +331,7 @@ export function StrategySimPage() {
             pnl_usdc = won ? run.shares * (1 - entry_price) : -run.shares * entry_price;
           }
         }
-        const id = liveIdRef.current--;
+        const id = run.id;
         outRows.push({
           id,
           created_at: run.createdAt,
@@ -353,6 +358,10 @@ export function StrategySimPage() {
         });
       }
       appendLiveRows(outRows);
+      setWsStreamNote(
+        `Settled ${outRows.length} live run${outRows.length > 1 ? "s" : ""} for window ${rt.windowSlug}.`
+      );
+      rt.pending = [];
     },
     [appendLiveRows]
   );
@@ -386,10 +395,22 @@ export function StrategySimPage() {
         setError("Live WSS window is not available yet. Start live stream first.");
         return;
       }
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (nowSec > liveWindow.endTs) {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ action: "subscribe", timeframe, symbol }));
+        }
+        setError("Current live window already ended. Wait for next window.");
+        return;
+      }
       const rt = ensureLiveRuntime(liveWindow);
       const now = Date.now();
+      const queuedRows: SimHistoryRow[] = [];
       for (const lane of laneList) {
+        const id = liveIdRef.current--;
         rt.pending.push({
+          id,
           laneIndex: lane.laneIndex,
           threshold: centsToThreshold(lane.cents),
           shares: lane.shares,
@@ -398,9 +419,35 @@ export function StrategySimPage() {
           tokenDiffLimitP: diffLimitCentsToParam(lane.tokenDiffLimitCents),
           createdAt: now,
         });
+        queuedRows.push({
+          id,
+          created_at: now,
+          window_slug: rt.windowSlug,
+          timeframe: rt.timeframe,
+          symbol: rt.symbol,
+          lane_index: lane.laneIndex,
+          threshold_p: centsToThreshold(lane.cents),
+          shares: lane.shares,
+          side_rule: lane.sideRule,
+          timer_sec: lane.timerSec,
+          token_diff_limit_p: diffLimitCentsToParam(lane.tokenDiffLimitCents),
+          entry_side: null,
+          entry_price: null,
+          entry_t: null,
+          strike_price: null,
+          final_price: null,
+          last_up_p: null,
+          last_down_p: null,
+          outcome_won: null,
+          pnl_usdc: null,
+          status: "pending_resolution",
+          error: null,
+        });
       }
+      appendLiveRows(queuedRows);
+      setWsStreamNote(`Queued ${laneList.length} live run${laneList.length > 1 ? "s" : ""} for current window.`);
     },
-    [liveWindow, ensureLiveRuntime]
+    [liveWindow, ensureLiveRuntime, timeframe, symbol, appendLiveRows]
   );
 
   useEffect(() => {
@@ -426,6 +473,9 @@ export function StrategySimPage() {
 
   useEffect(() => {
     if (!streaming) {
+      if (simulationModeRef.current === "live" && liveRuntimeRef.current) {
+        settleLiveRuntime(liveRuntimeRef.current);
+      }
       wsRef.current?.close();
       wsRef.current = null;
       setClobSnap({
@@ -434,6 +484,7 @@ export function StrategySimPage() {
       });
       setLiveWindow(null);
       setWsStreamNote("");
+      liveResubscribeWindowKeyRef.current = "";
       setSpotRtds(null);
       setPriceToBeat(null);
       return;
@@ -546,6 +597,44 @@ export function StrategySimPage() {
   }, [streaming, timeframe, symbol]);
 
   useEffect(() => {
+    if (!streaming || !liveWindow) return;
+    const key = `${liveWindow.startTs}-${liveWindow.endTs}`;
+    const refreshWindow = () => {
+      if (liveResubscribeWindowKeyRef.current === key) return;
+      liveResubscribeWindowKeyRef.current = key;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(
+        JSON.stringify({
+          action: "subscribe",
+          timeframe,
+          symbol,
+        })
+      );
+      setWsStreamNote("Refreshing live window subscription…");
+    };
+    const delayMs = liveWindow.endTs * 1000 - Date.now();
+    if (delayMs <= 0) {
+      refreshWindow();
+      return;
+    }
+    const timer = setTimeout(refreshWindow, delayMs + 100);
+    return () => clearTimeout(timer);
+  }, [streaming, liveWindow?.startTs, liveWindow?.endTs, timeframe, symbol, liveWindow]);
+
+  useEffect(() => {
+    if (simulationMode !== "live") return;
+    const timer = setInterval(() => {
+      const rt = liveRuntimeRef.current;
+      if (!rt || rt.pending.length === 0) return;
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (nowSec <= rt.endTs) return;
+      settleLiveRuntime(rt);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [simulationMode, settleLiveRuntime]);
+
+  useEffect(() => {
     if (simulationMode !== "live") return;
     if (!liveWindow) return;
     void ensureLiveRuntime(liveWindow);
@@ -604,7 +693,6 @@ export function StrategySimPage() {
       }
       const lane = lanes[i];
       queueLiveRuns([lane]);
-      setError("");
       return;
     }
     const L = lanes[i];
@@ -645,6 +733,8 @@ export function StrategySimPage() {
 
   const deleteRow = async (id: number) => {
     if (simulationMode === "live") {
+      const rt = liveRuntimeRef.current;
+      if (rt) rt.pending = rt.pending.filter((p) => p.id !== id);
       setLiveHistory((prev) => prev.filter((r) => r.id !== id));
       return;
     }
@@ -659,6 +749,8 @@ export function StrategySimPage() {
   const clearAll = async () => {
     if (simulationMode === "live") {
       if (!window.confirm("Clear all UI live simulation rows?")) return;
+      const rt = liveRuntimeRef.current;
+      if (rt) rt.pending = [];
       setLiveHistory([]);
       setError("");
       return;
@@ -772,7 +864,7 @@ export function StrategySimPage() {
           spotRtds != null &&
           Number.isFinite(priceToBeat) &&
           Number.isFinite(spotRtds)
-            ? spotRtds - priceToBeat
+            ? priceToBeat - spotRtds
             : null
         }
       />

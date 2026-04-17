@@ -352,7 +352,7 @@ export function LiveDashboardPage() {
           spotRtds?.value != null &&
           Number.isFinite(priceToBeat) &&
           Number.isFinite(spotRtds.value)
-            ? spotRtds.value - priceToBeat
+            ? priceToBeat - spotRtds.value
             : null
         }
         clockOffsetMs={clockOffsetMs}
